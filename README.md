@@ -2,28 +2,6 @@
 
 This repository contains an implementation of **Algorithm 1: Inferable EBM** from the paper "Statistical Inference for Explainable Boosting Machines".
 
-## Overview
-
-The `InferableEBMRegressor` extends the standard Explainable Boosting Machine (EBM) with statistical inference capabilities through:
-
-1. **Algorithm 1 Implementation**: Subsampling, mean-centering, and truncation
-2. **Statistical Inference**: Prediction intervals and variable importance tests
-3. **Structure Matrices**: Kernel matrices and influence vectors for uncertainty quantification
-
-## Installation
-
-The implementation is integrated into InterpretML and installed in development mode:
-
-```bash
-# Navigate to the project directory
-cd /Users/Jonathan/research/giles/aistats2025
-
-# Activate virtual environment
-source venv/bin/activate
-
-# The package is already installed in development mode
-```
-
 ## Quick Start
 
 ```python
