@@ -3,6 +3,7 @@
 import argparse, os
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.special import erfinv
 
 # Common import helper: prefer local estimator file, else import from interpret if available
 try:
@@ -43,7 +44,8 @@ def main():
     args = ap.parse_args()
 
     rng = np.random.default_rng(0)
-    (Xtr, ytr), (Xcal, ycal), (Xte, yte) = split3(*make_additive(args.n, args.p, rng, args.noise), rng)
+    X, y, f = make_additive(args.n, args.p, rng, args.noise)
+    (Xtr, ytr), (Xcal, ycal), (Xte, yte) = split3(X, y, rng)
 
     ebm = InferableEBMRegressor(max_rounds=args.rounds, subsample_rate=1.0, truncation=3.0, random_state=0).fit(Xtr, ytr)
     sigma = float(np.std(ycal - ebm.predict(Xcal), ddof=1))
@@ -60,7 +62,7 @@ def main():
     z.sort()
     # QQ plot against standard normal
     q = np.linspace(0.5/len(z), 1-0.5/len(z), len(z))
-    theo = np.sqrt(2)*np.erfinv(2*q - 1)
+    theo = np.sqrt(2)*erfinv(2*q - 1)
 
     plt.figure(figsize=(6,6))
     plt.plot(theo, z, '.', ms=3)
