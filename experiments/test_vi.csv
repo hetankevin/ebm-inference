@@ -1,0 +1,3 @@
+case,stat,df,p_value
+keep_signal,0.0,30,1.0
+remove_signal,0.0,30,1.0
