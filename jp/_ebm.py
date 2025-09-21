@@ -4110,11 +4110,16 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
     # Statistical inference specific attributes
     Kk_: list[np.ndarray]  # np.float64, 2D[sample, sample] - structure matrices
     pinv_Ik_: list[np.ndarray]  # np.float64, 2D[sample, sample] - pseudoinverses of (I - S_k)
-    kernel_matrix_: np.ndarray  # np.float64, 2D[sample, sample]
-    inv_IplusK_: np.ndarray  # np.float64, 2D[sample, sample]
+    kernel_matrix_: np.ndarray  # np.float64, 2D[sample, sample] or None if using Nyström
+    inv_IplusK_: np.ndarray  # np.float64, 2D[sample, sample] or None if using Nyström
     J_: np.ndarray  # np.float64, 2D[sample, sample] - centering operator
     centered_: bool
     sigma_: float  # Estimated noise scale
+    
+    # Nyström subsampling attributes
+    _nys_C: Optional[np.ndarray]  # np.float64, 2D[sample, landmark] - cross-kernel
+    _nys_M: Optional[np.ndarray]  # np.float64, 2D[landmark, landmark] - Woodbury matrix M
+    _nys_landmarks: Optional[np.ndarray]  # np.int64, 1D[landmark] - landmark indices
 
     # TODO PK v.3 use underscores here like RegressorMixin._estimator_type?
     available_explanations = ("global", "local", "confidence", "prediction_intervals")
@@ -4156,6 +4161,10 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         truncation: float = 3.0,
         honest: bool = False,
         min_bin_count: Optional[int] = None,
+        # Nyström subsampling parameters
+        use_nystrom: bool = False,
+        nystrom_rank: int = 256,
+        nystrom_ridge: float = 1e-6,
         # Adaptive binning parameters
         max_bins_auto: int = 512,
         min_bins_auto: int = 8,
@@ -4216,6 +4225,9 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         self.truncation = truncation
         self.honest = honest
         self.min_bin_count = min_bin_count
+        self.use_nystrom = use_nystrom
+        self.nystrom_rank = nystrom_rank
+        self.nystrom_ridge = nystrom_ridge
         self.max_bins_auto = max_bins_auto
         self.min_bins_auto = min_bins_auto
         
@@ -4227,6 +4239,11 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         self.J_ = None
         self.centered_ = False
         self.sigma_ = None
+        
+        # Initialize Nyström attributes
+        self._nys_C = None
+        self._nys_M = None
+        self._nys_landmarks = None
 
     def predict(self, X, init_score=None):
         """Predict using the fitted model."""
@@ -4457,20 +4474,137 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             Ik = np.eye(n_samples) - S_k
             self.pinv_Ik_.append(_eigh_pinv_psd(Ik))
         
-        # Build aggregated kernel matrix K = Σ_k (I - S_k)^† J S_k
-        K = np.zeros((n_samples, n_samples), dtype=float)
-        for pinv_Ik, Sk in zip(self.pinv_Ik_, self.Kk_):
-            K += pinv_Ik @ self.J_ @ Sk
+        # Build kernels using exact or Nyström approach
+        self._build_kernels()
         
-        self.kernel_matrix_ = K
-        
-        # Robust inverse of (I+K)
-        A = np.eye(n_samples) + K
+        self.centered_ = True
+
+    def _apply_J(self, v):
+        """Apply J = I - 11^T/n to vector/matrix v (n x 1 or n x d)."""
+        return v - np.mean(v, axis=0, keepdims=True)
+
+    def _I_minus_Sk_apply_matrix(self, T, bins_j):
+        """Apply (I - S^k) to each column of T (n x d) by subtracting per-bin column means."""
+        # bins_j: length-n integer bin ids for feature k
+        # For speed, loop over unique bins and operate in place
+        uniq = np.unique(bins_j)
+        for b in uniq:
+            idx = np.flatnonzero(bins_j == b)
+            if idx.size == 0:
+                continue
+            mu = T[idx, :].mean(axis=0, keepdims=True)
+            T[idx, :] -= mu
+        return T
+
+    def _same_bin_column(self, bins_j, landmark_row):
+        """Return v (length n): 1/m on rows in same bin as landmark_row, else 0."""
+        b = int(bins_j[landmark_row])
+        idx = np.flatnonzero(bins_j == b)
+        v = np.zeros(bins_j.shape[0], dtype=float)
+        if idx.size > 0:
+            v[idx] = 1.0 / idx.size
+        return v
+
+    def _build_nystrom(self, d=None, seed=None, ridge=None):
+        """Build Nyström factors C (n x d) and M = (W + C^T C + λI)^{-1}."""
+        n = self.train_X_.shape[0]
+        if d is None:
+            d = min(self.nystrom_rank, n)
+        if ridge is None:
+            ridge = self.nystrom_ridge
+        rng = np.random.default_rng(self.random_state if seed is None else seed)
+        S = rng.choice(n, size=d, replace=False)  # landmark indices
+
+        # C = sum_k (I - S^k)[:, S] (columns already sum to zero)
+        C = np.zeros((n, d), dtype=float)
+        for k, bins_k in enumerate(self.train_bins_by_feat_):
+            # For each landmark column c, compute w = (I - S^k) e_{S[c]}
+            for c, lrow in enumerate(S):
+                b = int(bins_k[lrow])
+                idx_bin = np.flatnonzero(bins_k == b)
+                m = idx_bin.size
+                if m == 0:
+                    continue
+                w = np.zeros(n, dtype=float)
+                w[idx_bin] = -1.0 / m
+                w[int(lrow)] += 1.0
+                C[:, c] += w
+
+        W = C[S, :]               # d x d
+        CtC = C.T @ C
+        # Stable ridge scaled by trace(W)
+        lam = ridge * (np.trace(W) / max(1, d) + 1.0)
+        self._nys_C = C
+        # robust small-system inverse
+        self._nys_M = np.linalg.pinv(W + CtC + lam * np.eye(d), rcond=1e-8)
+        self._nys_landmarks = S
+
+    def _inv_apply_col(self, x):
+        """Column-apply Nyström inverse: (I+K)^{-1} x ≈ x - C (M (C^T x))."""
+        C = getattr(self, "_nys_C", None)
+        M = getattr(self, "_nys_M", None)
+        if C is None or M is None:
+            # fallback to exact inverse path
+            return self.inv_IplusK_ @ x
+        return x - C @ (M @ (C.T @ x))
+
+    def _inv_apply_row(self, y_row):
+        """
+        Row-apply (I+K)^{-1}:
+          y (I+K)^{-1} ≈ y - (y C) M C^T    if Nyström factors are present
+          y (I+K)^{-1} = y @ inv_IplusK_    as exact fallback
+        y_row: shape (n,), returns (n,)
+        """
+        C = getattr(self, "_nys_C", None)
+        M = getattr(self, "_nys_M", None)
+        if C is not None and M is not None:
+            return y_row - (y_row @ C) @ (M @ C.T)
+        inv = getattr(self, "inv_IplusK_", None)
+        if inv is not None:
+            return y_row @ inv
+        raise RuntimeError("No inverse available: build Nyström factors or exact inverse first.")
+
+    def _build_kernels(self):
+        """Build kernels using either Nyström approximation or exact computation."""
+        n = self.train_X_.shape[0]
+        p = self.train_X_.shape[1]
+        # J for convenience if you keep exact path elsewhere
+        self.J_ = np.eye(n) - np.ones((n, n)) / n
+
+        if self.use_nystrom:
+            # We assume you already computed self.train_bins_by_feat_ (list of length p arrays of bin ids)
+            self._build_nystrom(d=self.nystrom_rank, seed=self.random_state, ridge=self.nystrom_ridge)
+            # If other parts expect inv_IplusK_ to exist, you can optionally set a small placeholder:
+            # self.inv_IplusK_ = None
+            return
+
+        # ---- exact path below (keep your current implementation) ----
+        self.Kk_, self.pinv_Ik_ = [], []
+        for j in range(p):
+            b = self.train_bins_by_feat_[j]
+            order = np.argsort(b, kind="mergesort")
+            bo = b[order]
+            boundaries = np.flatnonzero(np.r_[True, bo[1:] != bo[:-1], True])
+            S = np.zeros((n, n), dtype=float)
+            for s, e in zip(boundaries[:-1], boundaries[1:]):
+                idx = order[s:e]
+                m = e - s
+                if m > 0:
+                    S[np.ix_(idx, idx)] = 1.0 / m
+            self.Kk_.append(S)
+        Ik = np.eye(n) - S
+        # (I - S^k) is its own pseudoinverse since it's a projector
+        self.pinv_Ik_.append(Ik)
+
+        K = np.zeros((n, n), dtype=float)
+        for Ik, Sk in zip(self.pinv_Ik_, self.Kk_):
+            # K = sum_k (I - S^k) J (I - S^k) (non-degenerate, symmetric PSD)
+            K += Ik @ self.J_ @ Ik
+        # robust inverse via eigendecomp
+        A = np.eye(n) + K
         w, V = np.linalg.eigh(A)
         wi = np.where(w > 1e-12, 1.0 / w, 0.0)
         self.inv_IplusK_ = (V * wi) @ V.T
-        
-        self.centered_ = True
 
     def _compute_structure_vector(self, x_k, feature_idx: int) -> np.ndarray:
         """k^{(k)}(x): 1/n_bin on training points sharing x's bin; 0 otherwise."""
@@ -4501,96 +4635,71 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             v[same] = 1.0 / m
         return v
 
-    def predict_intervals(self, X: np.ndarray, level: float = 0.95, mode: str = "prediction", sigma: float | None = None):
+    def predict_intervals(self, X, level=0.95, mode="prediction", sigma=None):
         """
-        Compute prediction intervals for new data.
-        
-        Based on the paper's asymptotic normality result:
-        (f̂^(k)(x) - r^(k)(x)^T f(X)) / ||r^(k)(x)|| → N(0, σ²)
-        
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Input samples.
-        level : float, default=0.95
-            Confidence level for prediction intervals.
-        mode : str, default="prediction"
-            Type of interval: "prediction" for prediction intervals, "confidence" for confidence intervals.
-        sigma : float, optional
-            Noise scale parameter. If None, estimated from training residuals.
-            
-        Returns
-        -------
-        intervals : tuple of arrays
-            (lower_bounds, upper_bounds, predictions) for the intervals.
-        """
-        if not self.centered_:
-            raise ValueError("Model must be fitted before computing prediction intervals")
-        
-        predictions = self.predict(X)
-        n_samples = len(X)
-        
-        # Noise scale: use provided sigma (calibration split) or fallback to stored sigma_
-        if sigma is None or not np.isfinite(sigma) or sigma <= 0:
-            sigma = self.sigma_
-        if not np.isfinite(sigma) or sigma <= 0:
-            sigma = float(np.std(self.train_y_ - self.predict(self.train_X_), ddof=1))
-            if not np.isfinite(sigma) or sigma <= 0:
-                sigma = 1e-8
-        
-        # Compute z-score for the given confidence level
-        zmap = {0.80: 1.28155, 0.90: 1.64485, 0.95: 1.95996, 0.98: 2.32635, 0.99: 2.57583}
-        z_score = float(zmap.get(float(level), 1.95996))
-        
-        lower_bounds = np.zeros(n_samples)
-        upper_bounds = np.zeros(n_samples)
-        
-        for i in range(n_samples):
-            # Compute influence vector for this prediction
-            r = self._r_vector(X[i])
-            
-            # Compute standard error based on influence vector norm
-            influence_norm = float(np.linalg.norm(r)) if np.all(np.isfinite(r)) else 0.0
-            
-            if mode == "prediction":
-                # Prediction interval: σ * sqrt(1 + ||r^(k)(x)||²)
-                std_error = sigma * np.sqrt(1 + influence_norm**2)
-            elif mode == "confidence":
-                # Confidence interval: σ * ||r^(k)(x)||
-                std_error = sigma * influence_norm
-            elif mode == "reproduction":
-                # Reproduction interval: sqrt(2) * σ * ||r^(k)(x)||
-                std_error = np.sqrt(2.0) * sigma * influence_norm
-            else:
-                raise ValueError(f"Unknown mode: {mode}. Must be 'prediction', 'confidence', or 'reproduction'")
-            
-            # Compute interval bounds
-            margin = z_score * std_error
-            lower_bounds[i] = predictions[i] - margin
-            upper_bounds[i] = predictions[i] + margin
-        
-        return lower_bounds, upper_bounds, predictions
+        Paper-aligned intervals using the fixed r(x).
+          - Confidence:   ± z * sigma * ||r(x)||
+          - Prediction:   ± z * sigma * sqrt(1 + ||r(x)||^2)
+          - Reproduction: ± z * sigma * sqrt(2) * ||r(x)||
 
-    def _r_vector(self, x: np.ndarray) -> np.ndarray:
+        sigma:
+          If None, uses self.sigma_ if valid; else falls back to train residual std; else tiny epsilon.
         """
-        Compute influence vector r(x) for a single prediction.
-        
-        This method computes the influence vector that represents how much each training
-        sample contributes to the prediction for a new point x.
+        X = np.asarray(X)
+        preds = self.predict(X)
+
+        if sigma is None or not np.isfinite(sigma) or sigma <= 0:
+            sigma = getattr(self, "sigma_", None)
+        if sigma is None or not np.isfinite(sigma) or sigma <= 0:
+            resid = self.train_y_ - self.predict(self.train_X_)
+            resid = resid[np.isfinite(resid)]
+            sigma = float(np.std(resid, ddof=1)) if resid.size else 1e-8
+        if not np.isfinite(sigma) or sigma <= 0:
+            sigma = 1e-8
+
+        zmap = {0.80: 1.28155, 0.90: 1.64485, 0.95: 1.95996, 0.98: 2.32635, 0.99: 2.57583}
+        z = float(zmap.get(float(level), 1.95996))
+
+        lo = np.empty(X.shape[0], dtype=float)
+        hi = np.empty(X.shape[0], dtype=float)
+
+        for i in range(X.shape[0]):
+            r_row = self._r_vector(X[i])
+            nr = float(np.linalg.norm(r_row))
+            if not np.isfinite(nr):
+                nr = 0.0
+            if mode == "confidence":
+                w = sigma * nr
+            elif mode == "prediction":
+                # stable sqrt(1 + nr^2)
+                w = sigma * np.hypot(1.0, nr)
+            elif mode == "reproduction":
+                w = np.sqrt(2.0) * sigma * nr
+            else:
+                raise ValueError("mode must be 'confidence', 'prediction', or 'reproduction'")
+            lo[i] = preds[i] - z * w
+            hi[i] = preds[i] + z * w
+
+        return lo, hi, preds
+
+    def _r_vector(self, x):
+        """
+        Non-degenerate r(x):
+          r(x) = sum_k  [ v_k(x)^T J (I+K)^{-1} ],
+        where v_k(x) is the same-bin average row vector for feature k.
+        We *do not* apply (I - S^k) to v_k(x), which would annihilate it.
         """
         n = self.train_X_.shape[0]
-        r = np.zeros(n, dtype=float)
-        
+        r_row = np.zeros(n, dtype=float)
+
         for j in range(self.train_X_.shape[1]):
-            # Get bin assignment for this feature
+            b_train = self.train_bins_by_feat_[j]
+            # Get bin assignment for this feature using existing logic
             old_bins = _assign_bins(np.array([[x[j]]]), [self.binning_list_[j]])[0]
             old = old_bins[0]
             new = int(self.old_to_new_map_[j][old])
-            
-            b_train = self.train_bins_by_feat_[j]
             same = (b_train == new)
             m = int(np.count_nonzero(same))
-            
             if m == 0:
                 # fallback: nearest non-empty new bin
                 unique = np.unique(b_train)
@@ -4601,14 +4710,20 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                 m = int(np.count_nonzero(same))
                 if m == 0:
                     continue
-            
+
+            # v_k(x): row vector 1/m on rows in the bin, 0 elsewhere
             v = np.zeros(n, dtype=float)
             v[same] = 1.0 / m
-            r += v @ self.pinv_Ik_[j] @ self.J_ @ self.inv_IplusK_
-        
-        r[~np.isfinite(r)] = 0.0
-        return r
 
+            # J: global centering
+            v_centered = v - v.mean()
+
+            # Apply (I+K)^{-1} on the RIGHT (row apply via Nyström/dense inverse)
+            q = self._inv_apply_row(v_centered)
+            r_row += q
+
+        r_row[~np.isfinite(r_row)] = 0.0
+        return r_row
 
     def variable_importance_test(self, X: np.ndarray, y: np.ndarray, groups: List[int], level: float = 0.95):
         """
