@@ -4,19 +4,19 @@ import argparse
 import numpy as np
 import pandas as pd
 
-# Common import helper: prefer local estimator file, else import from interpret if available
+import numpy as np
+
+# Import helper: prefer local estimator file, else from interpret if exported there
 try:
     from inferable_ebm_regressor import InferableEBMRegressor
-except Exception as _e:
+except Exception:
     try:
-        from interpret.glassbox import InferableEBMRegressor  # requires your package export
-    except Exception as _e2:
-        raise ImportError("Could not import InferableEBMRegressor from local file or interpret.glassbox. "
-                          "Place inferable_ebm_regressor.py next to this script or export it in your package.")
+        from interpret.glassbox import InferableEBMRegressor
+    except Exception:
+        raise ImportError("Place inferable_ebm_regressor.py next to this script or export it in your package.")
 
 
 def make_suite(rng, n=4000, p=5, noise=1.0):
-    # three datasets
     X1 = rng.uniform(0, 1, size=(n, 10))
     f1 = (10*np.sin(np.pi*X1[:,0]*X1[:,1]) + 20*(X1[:,2]-0.5)**2 + 10*X1[:,3] + 5*X1[:,4])
     y1 = f1 + rng.normal(0, noise, size=n)
@@ -32,6 +32,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=200)
     ap.add_argument("--reps", type=int, default=5)
+    ap.add_argument("--use-nystrom", action="store_true")
+    ap.add_argument("--nystrom-rank", type=int, default=256)
+    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="matchups.csv")
     args = ap.parse_args()
 

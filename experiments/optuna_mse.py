@@ -4,15 +4,16 @@ import argparse, warnings, sys
 import numpy as np
 import pandas as pd
 
-# Common import helper: prefer local estimator file, else import from interpret if available
+import numpy as np
+
+# Import helper: prefer local estimator file, else from interpret if exported there
 try:
     from inferable_ebm_regressor import InferableEBMRegressor
-except Exception as _e:
+except Exception:
     try:
-        from interpret.glassbox import InferableEBMRegressor  # requires your package export
-    except Exception as _e2:
-        raise ImportError("Could not import InferableEBMRegressor from local file or interpret.glassbox. "
-                          "Place inferable_ebm_regressor.py next to this script or export it in your package.")
+        from interpret.glassbox import InferableEBMRegressor
+    except Exception:
+        raise ImportError("Place inferable_ebm_regressor.py next to this script or export it in your package.")
 
 
 try:
@@ -31,6 +32,9 @@ def main():
     ap.add_argument("--p", type=int, default=5)
     ap.add_argument("--noise", type=float, default=1.0)
     ap.add_argument("--trials", type=int, default=50)
+    ap.add_argument("--use-nystrom", action="store_true")
+    ap.add_argument("--nystrom-rank", type=int, default=256)
+    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="optuna_ebm.csv")
     args = ap.parse_args()
 
@@ -49,7 +53,10 @@ def main():
         trunc = trial.suggest_float("truncation", 1.0, 5.0)
         subs = trial.suggest_float("subsample_rate", 0.5, 1.0)
         n_bins = trial.suggest_categorical("n_bins", [0, 32, 64, 128])
-        m = InferableEBMRegressor(max_rounds=rounds, truncation=trunc, subsample_rate=subs, max_bins=n_bins, random_state=0).fit(X[tr], y[tr])
+        rank = trial.suggest_categorical("nystrom_rank", [128, 256, 384, 512])
+        ridge = trial.suggest_float("nystrom_ridge", 1e-7, 1e-3, log=True)
+        m = InferableEBMRegressor(max_rounds=rounds, truncation=trunc, subsample_rate=subs, max_bins=n_bins,
+                                  random_state=0).fit(X[tr], y[tr])
         mse = float(np.mean((y[te] - m.predict(X[te]))**2))
         return mse
 

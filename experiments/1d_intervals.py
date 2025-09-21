@@ -4,15 +4,16 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Common import helper: prefer local estimator file, else import from interpret if available
+import numpy as np
+
+# Import helper: prefer local estimator file, else from interpret if exported there
 try:
     from inferable_ebm_regressor import InferableEBMRegressor
-except Exception as _e:
+except Exception:
     try:
-        from interpret.glassbox import InferableEBMRegressor  # requires your package export
-    except Exception as _e2:
-        raise ImportError("Could not import InferableEBMRegressor from local file or interpret.glassbox. "
-                          "Place inferable_ebm_regressor.py next to this script or export it in your package.")
+        from interpret.glassbox import InferableEBMRegressor
+    except Exception:
+        raise ImportError("Place inferable_ebm_regressor.py next to this script or export it in your package.")
 
 
 def true_fun(x):
@@ -24,6 +25,9 @@ def main():
     ap.add_argument("--noise", type=float, default=0.5)
     ap.add_argument("--rounds", type=int, default=200)
     ap.add_argument("--level", type=float, default=0.95)
+    ap.add_argument("--use-nystrom", action="store_true")
+    ap.add_argument("--nystrom-rank", type=int, default=256)
+    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="intervals_1d.png")
     args = ap.parse_args()
 
@@ -37,7 +41,10 @@ def main():
 
     ebm = InferableEBMRegressor(max_rounds=args.rounds, random_state=0).fit(X[tr], y[tr])
 
-    sigma = float(np.std(y[cal] - ebm.predict(X[cal]), ddof=1))
+    resid_cal = y[cal] - ebm.predict(X[cal])
+    resid_cal = resid_cal[np.isfinite(resid_cal)]
+    sigma = float(np.std(resid_cal, ddof=1)) if resid_cal.size else 1e-8
+
     xs = np.linspace(0,1,400)
     Xs = xs[:,None]
     ci_l, ci_u, yhat = ebm.predict_intervals(Xs, level=args.level, mode="confidence", sigma=sigma)

@@ -3,17 +3,17 @@
 import argparse, os
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.special import erfinv
 
-# Common import helper: prefer local estimator file, else import from interpret if available
+import numpy as np
+
+# Import helper: prefer local estimator file, else from interpret if exported there
 try:
     from inferable_ebm_regressor import InferableEBMRegressor
-except Exception as _e:
+except Exception:
     try:
-        from interpret.glassbox import InferableEBMRegressor  # requires your package export
-    except Exception as _e2:
-        raise ImportError("Could not import InferableEBMRegressor from local file or interpret.glassbox. "
-                          "Place inferable_ebm_regressor.py next to this script or export it in your package.")
+        from interpret.glassbox import InferableEBMRegressor
+    except Exception:
+        raise ImportError("Place inferable_ebm_regressor.py next to this script or export it in your package.")
 
 
 def make_additive(n, p, rng, noise=1.0):
@@ -40,29 +40,37 @@ def main():
     ap.add_argument("--noise", type=float, default=1.0)
     ap.add_argument("--rounds", type=int, default=200)
     ap.add_argument("--level", type=float, default=0.95)
+    ap.add_argument("--use-nystrom", action="store_true")
+    ap.add_argument("--nystrom-rank", type=int, default=256)
+    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="qq_plot_ci.png")
     args = ap.parse_args()
 
     rng = np.random.default_rng(0)
-    X, y, f = make_additive(args.n, args.p, rng, args.noise)
+    (X, y, f) = make_additive(args.n, args.p, rng, args.noise)
     (Xtr, ytr), (Xcal, ycal), (Xte, yte) = split3(X, y, rng)
 
-    ebm = InferableEBMRegressor(max_rounds=args.rounds, subsample_rate=1.0, truncation=3.0, random_state=0).fit(Xtr, ytr)
-    sigma = float(np.std(ycal - ebm.predict(Xcal), ddof=1))
+    ebm = InferableEBMRegressor(max_rounds=args.rounds, subsample_rate=1.0, truncation=3.0,
+                                random_state=0).fit(Xtr, ytr)
+    resid_cal = ycal - ebm.predict(Xcal)
+    resid_cal = resid_cal[np.isfinite(resid_cal)]
+    sigma = float(np.std(resid_cal, ddof=1)) if resid_cal.size else 1e-8
 
     # Standardize residuals with influence norm for CI
     z = []
+    preds_te = ebm.predict(Xte)
     for i in range(Xte.shape[0]):
         r = ebm._r_vector(Xte[i])  # CI influence
-        nr = float(np.linalg.norm(r))
+        nr = float(np.linalg.norm(r));  nr = nr if np.isfinite(nr) else 0.0
         if nr == 0:
             continue
-        z.append( (yte[i] - ebm.predict(Xte[i:i+1]))[0] / (sigma * nr) )
+        z.append( ( (preds_te[i] - f[i]) ) / (sigma * nr) )  # against f(x) on synthetic
+
     z = np.asarray(z).ravel()
     z.sort()
-    # QQ plot against standard normal
     q = np.linspace(0.5/len(z), 1-0.5/len(z), len(z))
-    theo = np.sqrt(2)*erfinv(2*q - 1)
+    # theoretical normal quantiles using inverse error function
+    theo = np.sqrt(2)*np.erfinv(2*q - 1)
 
     plt.figure(figsize=(6,6))
     plt.plot(theo, z, '.', ms=3)
@@ -70,7 +78,7 @@ def main():
     hi = max(theo.max(), z.max())
     plt.plot([lo, hi], [lo, hi], '--')
     plt.xlabel("Theoretical N(0,1) quantiles")
-    plt.ylabel("Standardized residual quantiles")
+    plt.ylabel("Standardized (f - fhat)/sigma||r||")
     plt.title("QQ plot (CI)")
     plt.tight_layout()
     plt.savefig(args.out, dpi=150)
