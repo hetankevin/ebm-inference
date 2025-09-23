@@ -4247,22 +4247,34 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
 
     def predict(self, X, init_score=None):
         """Predict using the fitted model."""
+        import numpy as np
         X = np.asarray(X)
         if not hasattr(self, 'has_fitted_') or not self.has_fitted_:
             raise RuntimeError("Call fit() first.")
         
-        # Assign new samples to bins using old structure
-        bins_old = _assign_bins(X, self.binning_list_)
-        
-        # Compute predictions using old→new mapping
-        preds = np.full(X.shape[0], self.intercept_, dtype=float)
-        for j in range(X.shape[1]):
+        n, p = X.shape
+
+        # Binners for each feature (already in your class)
+        binners = self.binning_list_  # list of length p
+
+        # Term parameters that training actually updates:
+        # If your training writes to self.additive_terms_ or self.scores_, use that here.
+        term_arr = getattr(self, "term_scores_", None)
+        if term_arr is None:
+            term_arr = getattr(self, "additive_terms_", None)
+        assert term_arr is not None, "EBM: cannot find term score arrays for prediction."
+
+        out = np.full(n, float(self.intercept_), dtype=float)
+        for j in range(p):
+            # Assign new samples to bins using old structure
+            bins_old = _assign_bins(X, self.binning_list_)
             # Map old bin ids to new bin ids
             old_bins = bins_old[j]
-            new_bins = np.clip(self.old_to_new_map_[j][old_bins], 0, self.term_scores_[j].shape[0]-1)
-            preds += self.term_scores_[j][new_bins]
+            new_bins = np.clip(self.old_to_new_map_[j][old_bins], 0, term_arr[j].shape[0]-1)
+            # Gather contribution for each sample from its bin
+            out += term_arr[j][new_bins]
         
-        return preds
+        return out
 
     def fit(self, X, y, sample_weight=None, bags=None, init_score=None):
         """
@@ -4312,7 +4324,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             self.new_bins_count_.append(m)
         
         # 2) Initialize intercept and per-feature shapes
-        self.intercept_ = float(np.mean(y))
+        self.intercept_ = float(np.mean(y))  # Initialize once to the mean
         self.term_scores_ = [np.zeros(self.new_bins_count_[j], dtype=float) 
                             for j in range(p)]
         
@@ -4332,39 +4344,45 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         # 3) Boulevard rounds with statistical inference modifications
         preds = _pred_train_current()
         for b in range(1, int(self.max_rounds) + 1):
+            step = 1.0 / (b + 1)  # Boulevard-like decay
+            
             for j in range(p):
                 # Residuals for feature j
-                r = (y - preds) + self.term_scores_[j][self.train_bins_by_feat_[j]]
+                r = y - preds
+                
+                # Apply per-bin updates, not broadcasty sums
+                bins_j = self.train_bins_by_feat_[j]        # shape (n,), ints in [0, n_bins_j)
+                scores_j = self.term_scores_[j]             # shape (#bins_j,)
                 
                 # Subsampling
                 if self.subsample_rate < 1.0:
                     take = (self.rng_.random(n) < self.subsample_rate)
                     r_sub = r[take]
-                    bins_sub = self.train_bins_by_feat_[j][take]
-                    sums = np.bincount(bins_sub, weights=r_sub, 
-                                      minlength=self.term_scores_[j].shape[0]).astype(float)
-                    cnts = np.bincount(bins_sub, 
-                                      minlength=self.term_scores_[j].shape[0]).astype(float)
+                    bins_sub = bins_j[take]
+                    # compute gradient per-bin (squared loss example)
+                    # g[b] = mean residual of samples that fall in bin b
+                    counts = np.bincount(bins_sub, minlength=scores_j.shape[0])
+                    sums   = np.bincount(bins_sub, weights=r_sub, minlength=scores_j.shape[0])
                 else:
-                    sums = np.bincount(self.train_bins_by_feat_[j], weights=r, 
-                                      minlength=self.term_scores_[j].shape[0]).astype(float)
-                    cnts = np.bincount(self.train_bins_by_feat_[j], 
-                                      minlength=self.term_scores_[j].shape[0]).astype(float)
+                    # compute gradient per-bin (squared loss example)
+                    # g[b] = mean residual of samples that fall in bin b
+                    counts = np.bincount(bins_j, minlength=scores_j.shape[0])
+                    sums   = np.bincount(bins_j, weights=r, minlength=scores_j.shape[0])
                 
-                # Mean-centering
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    t_bin = np.divide(sums, cnts, out=np.zeros_like(sums), where=cnts > 0)
-                
-                # Compute mean using actual training samples in bins
-                total = float(np.sum(cnts))
-                mu = float(np.dot(t_bin, cnts) / total) if total > 0 else 0.0
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    g = np.where(counts > 0, sums / counts, 0.0)
                 
                 # Truncation
-                t_center = np.clip(t_bin - mu, -self.truncation, self.truncation)
+                g = np.clip(g, -self.truncation, self.truncation)
                 
-                # Boulevard running average
-                self.term_scores_[j] = ((b - 1.0) / b) * self.term_scores_[j] + (1.0 / b) * t_center
-                self.intercept_ += mu
+                # update with shrinkage/decay
+                scores_j += step * g
+                self.term_scores_[j] = scores_j
+            
+            # Update intercept with the mean residual (not sum), with shrinkage/decay
+            r = y - _pred_train_current()
+            self.intercept_ += step * float(np.mean(r))
+            
             preds = _pred_train_current()
         
         # 4) Post-fit exact recenter per feature (∑ᵢfₖ(xᵢ)=0)
@@ -4372,19 +4390,49 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             self.intercept_, self.term_scores_, bin_weights, self.train_bins_by_feat_
         )
         
-        # 5) Set fitted flag before building kernels and computing sigma
+        # 5) Enforce centering + intercept consistency (additional safety)
+        self._center_terms_and_fix_intercept()
+        
+        # 6) Set fitted flag before building kernels and computing sigma
         self.has_fitted_ = True
         
-        # 6) Build structure matrices for statistical inference
+        # 7) Build structure matrices for statistical inference
         self._build_structure_matrices()
         
-        # 7) Default sigma estimation
+        # 8) Default sigma estimation
         resid = self.train_y_ - self.predict(self.train_X_)
         self.sigma_ = float(np.std(resid[np.isfinite(resid)], ddof=1))
         if not np.isfinite(self.sigma_) or self.sigma_ <= 0:
             self.sigma_ = 1e-8
         
         return self
+
+    def _center_terms_and_fix_intercept(self):
+        """Enforce centering + intercept consistency (once at end of fit)
+        This restores invariants and prevents silent drift
+        """
+        import numpy as np
+        y = self.train_y_
+        n, p = self.train_X_.shape
+
+        term_arr = getattr(self, "term_scores_", None) or getattr(self, "additive_terms_", None)
+        assert term_arr is not None
+
+        # Center each term on the train distribution and push the removed mean into intercept
+        for j in range(p):
+            bins = self.train_bins_by_feat_[j]
+            scores = term_arr[j]
+            counts = np.bincount(bins, minlength=scores.shape[0]).astype(float)
+            if counts.sum() == 0:
+                continue
+            w = counts / counts.sum()
+            m = float(np.dot(w, scores))
+            if np.isfinite(m) and abs(m) > 1e-15:
+                term_arr[j] = scores - m
+                self.intercept_ += m
+
+        # Force intercept to mean(y_train) now that terms are zero-mean
+        self.intercept_ = float(np.mean(y))
 
     def _merge_small_bins_and_map(self, bins_old: np.ndarray, min_count: int) -> tuple:
         """Merge tiny bins on TRAINING assignments and produce:
