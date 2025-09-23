@@ -1,19 +1,25 @@
-
 #!/usr/bin/env python3
 import argparse, os
 import numpy as np
 import pandas as pd
+import inspect
 
-import numpy as np
-
-# Import helper: prefer local estimator file, else from interpret if exported there
+# Import helper: force use of patched estimator
 try:
-    from inferable_ebm_regressor import InferableEBMRegressor
+    from inferable_ebm_regressor import InferableEBMRegressor  # your local, patched file
+    import inspect; print("predict_intervals from:", inspect.getsourcefile(InferableEBMRegressor.predict_intervals))
 except Exception:
     try:
-        from interpret.glassbox import InferableEBMRegressor
+        # Import directly from the interpret/_ebm.py file (patched version)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_ebm", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "interpret", "python", "interpret-core", "interpret", "glassbox", "_ebm", "_ebm.py"))
+        _ebm_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_ebm_module)
+        InferableEBMRegressor = _ebm_module.InferableEBMRegressor
+        import inspect; print("predict_intervals from:", inspect.getsourcefile(InferableEBMRegressor.predict_intervals))
     except Exception:
-        raise ImportError("Place inferable_ebm_regressor.py next to this script or export it in your package.")
+        from interpret.glassbox import InferableEBMRegressor
+        import inspect; print("predict_intervals from:", inspect.getsourcefile(InferableEBMRegressor.predict_intervals))
 
 
 def make_friedman(n, rng):
@@ -25,20 +31,20 @@ def split3(X, y, rng, cal_frac=0.2, test_frac=0.3):
     n = X.shape[0]
     idx = np.arange(n)
     rng.shuffle(idx)
-    n_test = int(n*test_frac)
-    n_cal = int((n-n_test)*cal_frac)
+    n_test = max(1, int(n * test_frac))
+    n_cal  = max(1, int((n - n_test) * cal_frac))
     te = idx[:n_test]
     cal = idx[n_test:n_test+n_cal]
     tr = idx[n_test+n_cal:]
-    return (X[tr], y[tr]), (X[cal], y[cal]), (X[te], y[te])
+    return (X[tr], y[tr], tr), (X[cal], y[cal], cal), (X[te], y[te], te)
 
 def run_rep(rep, args, base_seed=0):
     rng = np.random.default_rng(base_seed + 7919*rep)
     X, f_true = make_friedman(args.n, rng)
     y = f_true + rng.normal(0, args.noise, size=args.n)
 
-    (Xtr, ytr), (Xcal, ycal), (Xte, yte) = split3(X, y, rng, cal_frac=args.cal_frac, test_frac=args.test_frac)
-    f_te = f_true[:Xte.shape[0]]
+    (Xtr, ytr, tr), (Xcal, ycal, cal), (Xte, yte, te) = split3(X, y, rng, cal_frac=args.cal_frac, test_frac=args.test_frac)
+    f_te = f_true[te]  # Fix oracle indexing
 
     ebm = InferableEBMRegressor(
         max_rounds=args.rounds,
@@ -47,6 +53,39 @@ def run_rep(rep, args, base_seed=0):
         truncation=args.truncation,
         random_state=base_seed + 1009*rep,
     ).fit(Xtr, ytr)
+
+    # Quick verification that we're using the correct implementation
+    if rep == 0:  # Only debug first repetition
+        lo, hi, _ = ebm.predict_intervals(Xte[:5], level=0.95, mode="prediction", sigma=1.0)
+        print(f"Rep {rep}: PI widths with σ=1: {hi - lo}")
+        if np.allclose(hi - lo, 0):
+            print("WARNING: All PI widths are zero - check implementation!")
+        
+        # EBM estimation debugging
+        print("\n=== EBM Estimation Debug ===")
+        mu_y = float(np.mean(ebm.train_y_))
+        print("intercept_:", getattr(ebm, "intercept_", None), "  y_train_mean:", mu_y)
+
+        yhat_tr = ebm.predict(ebm.train_X_)
+        resid_tr = ebm.train_y_ - yhat_tr
+        print("train resid mean:", float(np.mean(resid_tr)))
+        print("pred mean:", float(np.mean(yhat_tr)), "  pred min/max:", float(np.min(yhat_tr)), float(np.max(yhat_tr)))
+        print("finite train preds:", np.isfinite(yhat_tr).all())
+
+        # Per-term mean contribution on training distribution
+        print("Per-term mean contributions:")
+        for j in range(ebm.train_X_.shape[1]):
+            try:
+                bins = ebm.train_bins_by_feat_[j]
+                # get per-bin score vector for feature j, adapt name to your storage
+                scores = ebm.term_scores_[j]          # <-- replace with your actual array (shape [n_bins_j])
+                w = np.bincount(bins, minlength=scores.shape[0]).astype(float)
+                w /= w.sum()
+                term_mean = float(np.dot(w, scores))
+                print(f"feature {j}: term_mean={term_mean:.6g}")
+            except Exception as e:
+                print(f"feature {j}: error getting term mean - {e}")
+        print("=== End EBM Debug ===\n")
 
     # Calibrated sigma with guards
     resid_cal = ycal - ebm.predict(Xcal)
