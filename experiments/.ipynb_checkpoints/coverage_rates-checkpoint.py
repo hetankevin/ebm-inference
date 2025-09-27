@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
-import argparse, os, sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import argparse, os
 import numpy as np
 import pandas as pd
 import inspect
-
-try:
-    from tqdm import tqdm
-except Exception:  # pragma: no cover - optional dependency
-    def tqdm(iterable, **_):
-        return iterable
-
-# Ensure repository root (with inferable_ebm_regressor module) is on sys.path.
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
 
 # Import helper: force use of patched estimator
 try:
@@ -55,15 +43,6 @@ def run_rep(rep, args, base_seed=0):
     X, f_true = make_friedman(args.n, rng)
     y = f_true + rng.normal(0, args.noise, size=args.n)
 
-    loss_history = []
-
-    def track_callback(bag_idx, step_idx, made_progress, best_score):
-        if bag_idx == 0:
-            loss_history.append(
-                dict(step=step_idx, made_progress=bool(made_progress), best_score=float(best_score))
-            )
-        return False
-
     (Xtr, ytr, tr), (Xcal, ycal, cal), (Xte, yte, te) = split3(X, y, rng, cal_frac=args.cal_frac, test_frac=args.test_frac)
     f_te = f_true[te]  # Fix oracle indexing
 
@@ -73,9 +52,7 @@ def run_rep(rep, args, base_seed=0):
         subsample_rate=args.subsample_rate,
         truncation=args.truncation,
         random_state=base_seed + 1009*rep,
-    )
-    ebm.callback = track_callback
-    ebm = ebm.fit(Xtr, ytr)
+    ).fit(Xtr, ytr)
 
     # Quick verification that we're using the correct implementation
     if rep == 0:  # Only debug first repetition
@@ -83,7 +60,7 @@ def run_rep(rep, args, base_seed=0):
         print(f"Rep {rep}: PI widths with σ=1: {hi - lo}")
         if np.allclose(hi - lo, 0):
             print("WARNING: All PI widths are zero - check implementation!")
-
+        
         # EBM estimation debugging
         print("\n=== EBM Estimation Debug ===")
         mu_y = float(np.mean(ebm.train_y_))
@@ -94,61 +71,6 @@ def run_rep(rep, args, base_seed=0):
         print("train resid mean:", float(np.mean(resid_tr)))
         print("pred mean:", float(np.mean(yhat_tr)), "  pred min/max:", float(np.min(yhat_tr)), float(np.max(yhat_tr)))
         print("finite train preds:", np.isfinite(yhat_tr).all())
-
-        def summarize_error(y_true, y_pred):
-            mask = np.isfinite(y_true) & np.isfinite(y_pred)
-            if not np.any(mask):
-                return float("nan"), float("nan")
-            residuals = y_true[mask] - y_pred[mask]
-            rmse = float(np.sqrt(np.mean(residuals ** 2)))
-            denom = np.sum(np.abs(y_true[mask]))
-            wape = float(np.sum(np.abs(residuals)) / denom) if denom > 1e-12 else float(np.sum(np.abs(residuals)))
-            return rmse, wape
-
-        train_rmse, train_wape = summarize_error(ytr, yhat_tr)
-        yhat_cal = ebm.predict(Xcal)
-        cal_rmse, cal_wape = summarize_error(ycal, yhat_cal)
-        yhat_te = ebm.predict(Xte)
-        test_rmse, test_wape = summarize_error(yte, yhat_te)
-
-        print("RMSE/WAPE by split:")
-        print(f"  train -> RMSE: {train_rmse:.6f}, WAPE: {train_wape:.6f}")
-        print(f"  valid -> RMSE: {cal_rmse:.6f}, WAPE: {cal_wape:.6f}")
-        print(f"  test  -> RMSE: {test_rmse:.6f}, WAPE: {test_wape:.6f}")
-
-        if loss_history:
-            loss_df = pd.DataFrame(loss_history)
-            print("\nLoss curve (bag 0 best_score by boosting step):")
-            print(loss_df.head())
-            if len(loss_df) > 5:
-                print("...")
-                print(loss_df.tail())
-
-        curve_rounds = np.unique(
-            np.linspace(1, max(1, args.rounds), num=min(args.rounds, 10), dtype=int)
-        )
-        loss_curve_rows = []
-        for r in curve_rounds:
-            probe = InferableEBMRegressor(
-                max_rounds=int(r),
-                max_bins=args.n_bins,
-                subsample_rate=args.subsample_rate,
-                truncation=args.truncation,
-                random_state=base_seed + 1009*rep,
-            ).fit(Xtr, ytr)
-            yhat_tr_probe = probe.predict(Xtr)
-            yhat_cal_probe = probe.predict(Xcal)
-            tr_rmse, tr_wape = summarize_error(ytr, yhat_tr_probe)
-            cal_rmse, cal_wape = summarize_error(ycal, yhat_cal_probe)
-            loss_curve_rows.append(
-                dict(round=int(r), train_rmse=tr_rmse, valid_rmse=cal_rmse,
-                     train_wape=tr_wape, valid_wape=cal_wape)
-            )
-
-        if loss_curve_rows:
-            loss_curve_df = pd.DataFrame(loss_curve_rows)
-            print("\nLoss curve samples (by max_rounds probe):")
-            print(loss_curve_df)
 
         # Per-term mean contribution on training distribution
         print("Per-term mean contributions:")
@@ -194,35 +116,23 @@ def run_rep(rep, args, base_seed=0):
 def main():
     np.seterr(over='ignore', invalid='ignore')  # avoid noisy warnings; we guard widths explicitly
     ap = argparse.ArgumentParser()
-    ap.add_argument("--n", type=int, default=1000)
-    ap.add_argument("--noise", type=float, default=1)
-    ap.add_argument("--cal-frac", dest="cal_frac", type=float, default=0.1)
-    ap.add_argument("--test-frac", dest="test_frac", type=float, default=0.2)
-    ap.add_argument("--rounds", type=int, default=50)
-    ap.add_argument("--max-leaves", type=int, default=2)
-    ap.add_argument("--n-bins", dest="n_bins", type=int, default=64)
+    ap.add_argument("--n", type=int, default=4000)
+    ap.add_argument("--noise", type=float, default=1.0)
+    ap.add_argument("--cal-frac", dest="cal_frac", type=float, default=0.2)
+    ap.add_argument("--test-frac", dest="test_frac", type=float, default=0.3)
+    ap.add_argument("--rounds", type=int, default=200)
+    ap.add_argument("--n-bins", dest="n_bins", type=int, default=0)
     ap.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1.0)
-    ap.add_argument("--truncation", type=float, default=100.0)
-    ap.add_argument("--reps", type=int, default=8)
+    ap.add_argument("--truncation", type=float, default=3.0)
+    ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--level", type=float, default=0.95)
     ap.add_argument("--use-nystrom", dest="use_nystrom", action="store_true")
-    ap.add_argument("--nystrom-rank", dest="nystrom_rank", type=int, default=64)
+    ap.add_argument("--nystrom-rank", dest="nystrom_rank", type=int, default=256)
     ap.add_argument("--nystrom-ridge", dest="nystrom_ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="coverage_summary.csv")
     args = ap.parse_args()
 
-    max_workers = min(args.reps, os.cpu_count() or 1)
-
-    if max_workers <= 1:
-        rows = [run_rep(r, args) for r in tqdm(range(args.reps))]
-    else:
-        # fan out repetitions with a process pool to leverage available cores
-        rows = []
-        with ProcessPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(run_rep, r, args): r for r in range(args.reps)}
-            for fut in tqdm(as_completed(futures), total=len(futures)):
-                rows.append(fut.result())
-        rows.sort(key=lambda entry: entry["rep"])
+    rows = [run_rep(r, args) for r in range(args.reps)]
     df = pd.DataFrame(rows)
     df.to_csv(args.out, index=False)
     print(df.describe())
