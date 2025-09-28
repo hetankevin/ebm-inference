@@ -35,8 +35,10 @@ except Exception:
 
 
 def make_friedman(n, rng):
-    X = rng.uniform(0.0, 1.0, size=(n, 10))
-    f = (10*np.sin(np.pi*X[:,0]*X[:,1]) + 20*(X[:,2]-0.5)**2 + 10*X[:,3] + 5*X[:,4])
+    X = rng.uniform(0.0, 1.0, size=(n, 5))
+    #f = (10*np.sin(np.pi*X[:,0]*X[:,1]) + 20*(X[:,2]-0.5)**2 + 10*X[:,3] + 5*X[:,4])
+    f = -5 + (10*np.sin(np.pi*X[:,0]) - 5*np.cos(np.pi*X[:,1])
+          + 20*(X[:,2]-0.5)**2 + 10*X[:,3] - 5*X[:,4])
     return X, f
 
 def split3(X, y, rng, cal_frac=0.2, test_frac=0.3):

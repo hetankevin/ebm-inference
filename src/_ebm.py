@@ -14,7 +14,7 @@ from itertools import combinations, count
 from math import ceil, isnan
 from multiprocessing.managers import SharedMemoryManager
 from operator import itemgetter
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Tuple
 from warnings import warn
 
 import numpy as np
@@ -4752,9 +4752,6 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
 
         ``bin_counts_list_[k]``
             Empirical training counts per merged bin (length ``n_bins_k``).
-        ``bin_weight_list_[k]``
-            Geometry-based proxy for the bin mass (used when approximating
-            norms/dot products).
         ``bin_probs_list_[k]``
             Normalised bin frequencies (summing to 1).
         ``bin_sum_y_list_[k]``
@@ -4803,11 +4800,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             probs = counts / total
             # Covariance-like matrix for centered one-hot variables
             sum_y = np.bincount(bins_j, weights=self.train_y_, minlength=m).astype(float)
-
-            # Safeguard division by zero for downstream norms/dots
-            counts_safe = np.where(counts > 0, counts, 1.0)
-
-            self.bin_counts_list_.append(counts_safe)
+            self.bin_counts_list_.append(counts)
             self.bin_probs_list_.append(probs)
             self.bin_sum_y_list_.append(sum_y)
             # Fast Sherman-Morrison factors for (I + Sigma)^{-1}
@@ -5216,6 +5209,54 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             v[same] = 1.0 / m
         return v
 
+    def _feature_sample_influence(self, feature_idx: int, value: float) -> np.ndarray:
+        """Sample-space influence vector produced by a single feature/value pair."""
+        v = self._compute_structure_vector(value, feature_idx)
+        if v.size == 0:
+            return v
+        v_centered = v - v.mean()
+        contrib = self._inv_apply_row(v_centered)
+        contrib[~np.isfinite(contrib)] = 0.0
+        return contrib
+
+    def _feature_bin_influence(self, feature_idx: int, value: float) -> Tuple[slice, np.ndarray]:
+        """Bin-space influence block produced by a single feature/value pair."""
+        if self.bin_offsets_ is None:
+            raise RuntimeError("Bin-level structures are not initialized.")
+        sl = self._feature_bin_slice(feature_idx)
+        length = sl.stop - sl.start
+        if length == 0:
+            return sl, np.zeros(0, dtype=float)
+
+        probs = self.bin_probs_list_[feature_idx]
+        bin_idx = self._resolve_new_bin(feature_idx, value)
+        diag_inv = self.bin_diag_inv_list_[feature_idx]
+        w = self.bin_w_list_[feature_idx]
+        denom = self.bin_inv_denom_list_[feature_idx]
+        prob_w_dot = self.bin_prob_w_dot_list_[feature_idx]
+        inv = self.bin_inv_i_plus_k_list_[feature_idx]
+
+        if diag_inv is not None and w is not None and denom is not None:
+            row_local = -probs * diag_inv
+            if 0 <= bin_idx < row_local.size:
+                row_local[bin_idx] += diag_inv[bin_idx]
+                w_bin = w[bin_idx]
+            else:
+                w_bin = 0.0
+            s = w_bin - prob_w_dot
+            row_local += (s / denom) * w
+        else:
+            row_local = np.zeros(length, dtype=float)
+            if 0 <= bin_idx < length:
+                row_local[bin_idx] = 1.0
+            row_local = row_local - probs
+            row_local = row_local @ inv if inv is not None else row_local
+
+        row_local = np.asarray(row_local, dtype=float)
+        row_local[~np.isfinite(row_local)] = 0.0
+        return sl, row_local
+
+    
     def predict_intervals(self, X, level=0.95, mode="prediction", sigma=None, inference_space: Optional[str] = None):
         """Compute confidence, prediction, or reproduction intervals.
 
@@ -5290,6 +5331,113 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
 
         return lo, hi, preds
 
+
+    def predict_feature_intervals(
+        self,
+        feature_idx: int,
+        x_k: Union[np.ndarray, Sequence[float]],
+        level: float = 0.95,
+        mode: str = "prediction",
+        sigma: Optional[float] = None,
+        inference_space: Optional[str] = None,
+        include_intercept: bool = True,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute intervals for the marginal contribution of a single feature.
+
+        Parameters
+        ----------
+        feature_idx : int
+            Index of the feature whose contribution is evaluated.
+        x_k : array-like of shape (n_samples,)
+            Feature values for the evaluation samples.
+        level : float, default=0.95
+            Desired two-sided coverage level.
+        mode : {"confidence", "prediction", "reproduction"}, default="prediction"
+            Interval type. See :meth:`predict_intervals` for semantics.
+        sigma : float or None, optional
+            Noise scale. ``None`` reuses/estimates the training residual scale.
+        inference_space : {"auto", "samples", "bins"} or None, optional
+            Algebra used for the influence vector. ``None``/``"auto"`` defer to
+            ``bin_level_inference``.
+        include_intercept : bool, default=True
+            If ``True`` the returned point predictions include ``intercept_`` in
+            addition to the feature contribution.
+
+        Returns
+        -------
+        (lower, upper, predictions) : tuple of ndarray
+            Interval bounds and point predictions, each of shape ``(n_samples,)``.
+
+        Raises
+        ------
+        RuntimeError
+            If the estimator has not been fitted or if the requested inference
+            mode cannot be constructed.
+        ValueError
+            If ``x_k`` is not one-dimensional or an unsupported ``mode``/
+            ``inference_space`` is supplied.
+        """
+        if not hasattr(self, "has_fitted_") or not self.has_fitted_:
+            raise RuntimeError("Call fit() before requesting feature intervals.")
+
+        x_k = np.asarray(x_k, dtype=float)
+        if x_k.ndim != 1:
+            raise ValueError("x_k must be a one-dimensional array.")
+
+        space = inference_space or "auto"
+        if space == "auto":
+            space = "bins" if self.bin_level_inference else "samples"
+        if space not in {"samples", "bins"}:
+            raise ValueError("inference_space must be 'samples', 'bins', 'auto', or None.")
+
+        if space == "bins" and self.bin_offsets_ is None:
+            self._build_bin_level_structures()
+
+        if sigma is None or not np.isfinite(sigma) or sigma <= 0:
+            sigma = getattr(self, "sigma_", None)
+        if sigma is None or not np.isfinite(sigma) or sigma <= 0:
+            resid = self.train_y_ - self.predict(self.train_X_)
+            resid = resid[np.isfinite(resid)]
+            sigma = float(np.std(resid, ddof=1)) if resid.size else 1e-8
+        if not np.isfinite(sigma) or sigma <= 0:
+            sigma = 1e-8
+
+        zmap = {0.80: 1.28155, 0.90: 1.64485, 0.95: 1.95996, 0.98: 2.32635, 0.99: 2.57583}
+        z = float(zmap.get(float(level), 1.95996))
+
+        bins_old = _assign_bins(x_k.reshape(-1, 1), [self.binning_list_[feature_idx]])[0]
+        bins_old = np.clip(bins_old, 0, self.old_to_new_map_[feature_idx].shape[0] - 1)
+        bins_new = self.old_to_new_map_[feature_idx][bins_old]
+        contrib = self.term_scores_[feature_idx][bins_new]
+        preds = contrib + (self.intercept_ if include_intercept else 0.0)
+
+        lower = np.empty_like(preds, dtype=float)
+        upper = np.empty_like(preds, dtype=float)
+
+        if space == "bins":
+            probs = self.bin_probs_list_[feature_idx]
+
+        for idx, val in enumerate(x_k):
+            if space == "bins":
+                sl, block = self._feature_bin_influence(feature_idx, float(val))
+                r_norm = np.sqrt(np.sum((block ** 2) * probs)) if block.size else 0.0
+            else:
+                vec = self._feature_sample_influence(feature_idx, float(val))
+                r_norm = float(np.linalg.norm(vec)) if vec.size else 0.0
+            norm = r_norm if np.isfinite(r_norm) else 0.0
+            if mode == "confidence":
+                width = sigma * norm
+            elif mode == "prediction":
+                width = sigma * np.hypot(1.0, norm)
+            elif mode == "reproduction":
+                width = np.sqrt(2.0) * sigma * norm
+            else:
+                raise ValueError("mode must be 'confidence', 'prediction', or 'reproduction'.")
+            lower[idx] = preds[idx] - z * width
+            upper[idx] = preds[idx] + z * width
+
+        return lower, upper, preds
+    
     def _r_vector(self, x, inference_space: Optional[str] = None):
         """Compute the influence vector ``r(x)`` in either sample or bin space.
 
@@ -5323,37 +5471,8 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
 
         n = self.train_X_.shape[0]
         r_row = np.zeros(n, dtype=float)
-
-        for j in range(self.train_X_.shape[1]):
-            b_train = self.train_bins_by_feat_[j]
-            # Get bin assignment for this feature using existing logic
-            old_bins = _assign_bins(np.array([[x[j]]]), [self.binning_list_[j]])[0]
-            old = old_bins[0]
-            new = int(self.old_to_new_map_[j][old])
-            same = (b_train == new)
-            m = int(np.count_nonzero(same))
-            if m == 0:
-                # fallback: nearest non-empty new bin
-                unique = np.unique(b_train)
-                if unique.size == 0:
-                    continue
-                new = int(unique[np.argmin(np.abs(unique - new))])
-                same = (b_train == new)
-                m = int(np.count_nonzero(same))
-                if m == 0:
-                    continue
-
-            # v_k(x): row vector 1/m on rows in the bin, 0 elsewhere
-            v = np.zeros(n, dtype=float)
-            v[same] = 1.0 / m
-
-            # J: global centering
-            v_centered = v - v.mean()
-
-            # Apply (I+K)^{-1} on the RIGHT (row apply via Nyström/dense inverse)
-            q = self._inv_apply_row(v_centered)
-            r_row += q
-
+        for j, val in enumerate(x):
+            r_row += self._feature_sample_influence(j, float(val))
         r_row[~np.isfinite(r_row)] = 0.0
         return r_row
 
@@ -5387,43 +5506,23 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         active_set = None if active_features is None else set(active_features)
 
         for j in range(len(self.train_bins_by_feat_)):
-            sl = self._feature_bin_slice(j)
-            if sl.start == sl.stop:
-                continue
             if active_set is not None and j not in active_set:
                 continue
-
-            probs = self.bin_probs_list_[j]
-
-            bin_idx = self._resolve_new_bin(j, x[j])
-
-            diag_inv = self.bin_diag_inv_list_[j]
-            w = self.bin_w_list_[j]
-            denom = self.bin_inv_denom_list_[j]
-            prob_w_dot = self.bin_prob_w_dot_list_[j]
-            inv = self.bin_inv_i_plus_k_list_[j]
-
-            if diag_inv is not None and w is not None and denom is not None:
-                row_local = -probs * diag_inv
-                if 0 <= bin_idx < row_local.size:
-                    row_local[bin_idx] += diag_inv[bin_idx]
-                    w_bin = w[bin_idx]
-                else:
-                    w_bin = 0.0
-                s = w_bin - prob_w_dot
-                row_local += (s / denom) * w
-            else:
-                # Dense inverse fallback when Sherman-Morrison is unstable
-                e = np.zeros(sl.stop - sl.start, dtype=float)
-                if 0 <= bin_idx < e.size:
-                    e[bin_idx] = 1.0
-                centered = e - probs
-                row_local = centered @ inv if inv is not None else centered
-
-            row_local[~np.isfinite(row_local)] = 0.0
-            r[sl] = row_local
+            sl, block = self._feature_bin_influence(j, float(x[j]))
+            if block.size:
+                r[sl] = block
 
         return r
+
+    def _r_vector_feature(self, feature_idx: int, value: float, inference_space: str) -> np.ndarray:
+        """Return the influence vector contributed by a single feature/value pair."""
+        if inference_space == "bins":
+            r = np.zeros(self.bin_total_bins_, dtype=float)
+            sl, block = self._feature_bin_influence(feature_idx, value)
+            if block.size:
+                r[sl] = block
+            return r
+        return self._feature_sample_influence(feature_idx, value)
 
     def variable_importance_test(self, X: np.ndarray, y: np.ndarray, groups: List[int], level: float = 0.95):
         """Perform a held-out chi-square style variable-importance test.
