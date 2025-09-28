@@ -3,7 +3,7 @@
 import argparse
 import os
 import sys
-
+from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 plt.style.use('matplotlibrc')
@@ -38,16 +38,16 @@ def friedman_true_function(X: np.ndarray) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--n", type=int, default=4000, help="Number of training samples")
-    parser.add_argument("--noise", type=float, default=1.0, help="Standard deviation of Gaussian noise")
+    parser.add_argument("--n", type=int, default=1000, help="Number of training samples")
+    parser.add_argument("--noise", type=float, default=2, help="Standard deviation of Gaussian noise")
     parser.add_argument("--level", type=float, default=0.95, help="Two-sided coverage level")
     parser.add_argument("--mode", choices=["confidence", "prediction", "reproduction"], default="confidence")
     parser.add_argument("--n-points", type=int, default=200, help="Grid size per feature")
     parser.add_argument("--inference-space", choices=["auto", "samples", "bins"], default="auto")
-    parser.add_argument("--max-rounds", type=int, default=200)
-    parser.add_argument("--n-bins", type=int, default=64)
-    parser.add_argument("--bin-level", action="store_true", help="Use bin-level inference when fitting")
-    parser.add_argument("--output", type=str, default="feature_interval_plots.png", help="Output figure path")
+    parser.add_argument("--max-rounds", type=int, default=100)
+    parser.add_argument("--n-bins", type=int, default=32)
+    parser.add_argument("--bin-level-inference", default=True, help="Use bin-level inference when fitting")
+    parser.add_argument("--output", type=str, default="plots/feature_interval_plots.png", help="Output figure path")
     parser.add_argument("--show", action="store_true", help="Display the plot interactively")
     return parser.parse_args()
 
@@ -65,25 +65,28 @@ def main() -> None:
         subsample_rate=1.0,
         truncation=3.0,
         random_state=0,
-        bin_level_inference=args.bin_level,
+        bin_level_inference=args.bin_level_inference,
     )
     model.fit(X, y)
+    print('Model fitted')
 
     baseline = np.mean(X, axis=0)
     n_features = X.shape[1]
     grid = np.linspace(0.0, 1.0, args.n_points)
 
     fig, axes = plt.subplots(
-        n_features,
         1,
-        figsize=(8, 2.5 * n_features),
-        sharex=True,
+        n_features,
+        figsize=(10, 3),
+        sharey=True,
         constrained_layout=True,
     )
     if n_features == 1:
         axes = [axes]
-
-    for j, ax in enumerate(axes):
+    else:
+        axes = axes.reshape(-1)
+    print('Forming intervals')
+    for j, ax in tqdm(enumerate(axes)):
         X_grid = np.repeat(baseline[None, :], args.n_points, axis=0)
         X_grid[:, j] = grid
 
@@ -97,6 +100,15 @@ def main() -> None:
         )
         oracle = friedman_true_function(X_grid)
 
+        # Align the marginal mean with the oracle to resolve the GAM identification ambiguity.
+        oracle_mean = float(np.mean(oracle))
+        pred_mean = float(np.mean(preds))
+        shift = oracle_mean - pred_mean
+        if shift != 0.0:
+            preds = preds + shift
+            lower = lower + shift
+            upper = upper + shift
+
         ax.plot(grid, oracle, label="True function", color="red", linewidth=1.5)
         ax.plot(grid, preds, label="EBM prediction", linewidth=1.5)
         ax.fill_between(
@@ -107,14 +119,26 @@ def main() -> None:
             alpha=0.2,
             label=f"{args.level*100:.0f}% interval",
         )
-        ax.set_ylabel(f"Feature {j}")
+
+        coverage = float(np.mean((oracle >= lower) & (oracle <= upper)))
+        ax.text(
+            0.02,
+            0.95,
+            f"Coverage: {coverage*100:.2f}%",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize="small",
+            bbox={"facecolor": "white", "edgecolor": "gray", "alpha": 0.8},
+        )
+        ax.set_xlabel(f"Feature {j+1}", fontsize=14)
         ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
-        ax.legend(loc="best", fontsize="small")
+        ax.legend(loc="lower left", fontsize="small")
 
-    axes[-1].set_xlabel("Feature value")
-    fig.suptitle("Feature-wise Predictions with Confidence Intervals")
-
-    fig.savefig(args.output, dpi=200)
+    axes[0].set_ylabel("Value", fontsize=14)
+    #fig.suptitle("Feature-wise Predictions with Confidence Intervals")
+    plt.tight_layout()
+    fig.savefig(args.output, dpi=300)
     if args.show:
         plt.show()
     plt.close(fig)

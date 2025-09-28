@@ -5,8 +5,10 @@ import json
 import os
 import sys
 import zipfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -15,6 +17,7 @@ import pandas as pd
 from optuna import Trial
 from optuna.samplers import TPESampler
 
+# scikit-learn
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.impute import SimpleImputer
@@ -131,18 +134,48 @@ DATASET_LOADERS = {
 }
 
 
-def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
+def _split_columns(X: pd.DataFrame) -> Tuple[List[str], List[str]]:
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = [c for c in X.columns if c not in num_cols]
+    return num_cols, cat_cols
+
+
+def _make_preprocessor(num_cols: List[str], cat_cols: List[str]) -> ColumnTransformer:
     transformers = []
     if num_cols:
-        transformers.append(("num", Pipeline([("imputer", SimpleImputer()), ("scaler", StandardScaler())]), num_cols))
+        transformers.append((
+            "num",
+            Pipeline([("imputer", SimpleImputer()), ("scaler", StandardScaler())]),
+            num_cols,
+        ))
     if cat_cols:
-        transformers.append(("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", OneHotEncoder(handle_unknown="ignore"))]), cat_cols))
+        transformers.append((
+            "cat",
+            Pipeline(
+                [
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(handle_unknown="ignore")),
+                ]
+            ),
+            cat_cols,
+        ))
     return ColumnTransformer(transformers)
 
 
-def cross_val_score_neg_mse(model, X, y, preprocessor, n_splits=3, random_state=0):
+def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
+    num_cols, cat_cols = _split_columns(X)
+    return _make_preprocessor(num_cols, cat_cols)
+
+
+def cross_val_score_neg_mse(
+    model,
+    X,
+    y,
+    column_groups: Tuple[List[str], List[str]],
+    n_splits: int = 3,
+    random_state: int = 0,
+):
+    preprocessor = _make_preprocessor(*column_groups)
     pipeline = Pipeline([
         ("pre", preprocessor),
         ("model", model),
@@ -152,7 +185,13 @@ def cross_val_score_neg_mse(model, X, y, preprocessor, n_splits=3, random_state=
     return scores.mean()
 
 
-def tune_parameters(model_name: str, X: pd.DataFrame, y: pd.Series, preprocessor, args) -> Dict:
+def tune_parameters(
+    model_name: str,
+    X: pd.DataFrame,
+    y: pd.Series,
+    column_groups: Tuple[List[str], List[str]],
+    args,
+) -> Dict:
     def objective(trial: Trial):
         if model_name == "RandomForest":
             params = {
@@ -234,7 +273,14 @@ def tune_parameters(model_name: str, X: pd.DataFrame, y: pd.Series, preprocessor
         else:
             raise ValueError(model_name)
 
-        score = cross_val_score_neg_mse(model, X, y, preprocessor, n_splits=3, random_state=args.seed)
+        score = cross_val_score_neg_mse(
+            model,
+            X,
+            y,
+            column_groups,
+            n_splits=3,
+            random_state=args.seed,
+        )
         return score
 
     sampler = TPESampler(seed=args.seed)
@@ -277,7 +323,16 @@ def instantiate(model_name: str, params: Dict, ensemble_size: Optional[int], arg
     raise ValueError(model_name)
 
 
-def evaluate_curves(models: Dict[str, Dict], preprocessor, X_train, y_train, X_test, y_test, ensemble_sizes: List[int], args) -> Dict[str, List[float]]:
+def evaluate_curves(
+    models: Dict[str, Dict],
+    column_groups: Tuple[List[str], List[str]],
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+    ensemble_sizes: List[int],
+    args,
+) -> Dict[str, List[float]]:
     results = {}
     for name, params in models.items():
         mses = []
@@ -287,12 +342,25 @@ def evaluate_curves(models: Dict[str, Dict], preprocessor, X_train, y_train, X_t
                     mses.append(mses[-1])
                     continue
             model = instantiate(name, params, size, args)
+            preprocessor = _make_preprocessor(*column_groups)
             pipeline = Pipeline([("pre", preprocessor), ("model", model)])
             pipeline.fit(X_train, y_train)
             preds = pipeline.predict(X_test)
             mses.append(mean_squared_error(y_test, preds))
         results[name] = mses
     return results
+
+
+def _tune_model_task(
+    model_name: str,
+    X: pd.DataFrame,
+    y: pd.Series,
+    column_groups: Tuple[List[str], List[str]],
+    args_dict: Dict,
+):
+    args_ns = SimpleNamespace(**args_dict)
+    params = tune_parameters(model_name, X, y, column_groups, args_ns)
+    return model_name, params
 
 
 def plot_results(dataset_name: str, ensemble_sizes: List[int], mse_curves: Dict[str, List[float]], ax):
@@ -323,6 +391,13 @@ def main():
     parser.add_argument("--plot", type=str, default="plots/optuna_mse.png")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--bin-level-inference", action="store_true")
+    cpu_total = os.cpu_count() or 1
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, cpu_total - 1),
+        help="Number of parallel processes for model tuning (1 disables multiprocessing)",
+    )
     args = parser.parse_args()
 
     ensemble_sizes = list(range(args.ensemble_start, args.ensemble_stop + 1, args.ensemble_step))
@@ -344,7 +419,7 @@ def main():
             test_size=args.test_size,
             random_state=args.seed,
         )
-        preprocessor = build_preprocessor(dataset.X)
+        column_groups = _split_columns(dataset.X)
         base_models = ["InferableEBM", "EBM", "RandomForest", "GradientBoosting", "ElasticNet"]
         if lgb is not None:
             base_models.append("LightGBM")
@@ -352,14 +427,33 @@ def main():
             base_models.append("XGBoost")
 
         tuned_params = {}
-        for name in base_models:
-            print(f"Tuning {name} ...")
-            try:
-                params = tune_parameters(name, X_train, y_train, preprocessor, args)
-                tuned_params[name] = params
-            except Exception as exc:
-                print(f"  Skipping {name}: {exc}")
-        curves = evaluate_curves(tuned_params, preprocessor, X_train, y_train, X_test, y_test, ensemble_sizes, args)
+        if args.workers != 1:
+            max_workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
+            args_dict = vars(args).copy()
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
+                for name in base_models:
+                    print(f"Tuning {name} ...")
+                    fut = executor.submit(_tune_model_task, name, X_train, y_train, column_groups, args_dict)
+                    futures[fut] = name
+                for fut in as_completed(futures):
+                    name = futures[fut]
+                    try:
+                        model_name, params = fut.result()
+                    except Exception as exc:
+                        print(f"  Skipping {name}: {exc}")
+                    else:
+                        tuned_params[model_name] = params
+        else:
+            for name in base_models:
+                print(f"Tuning {name} ...")
+                try:
+                    params = tune_parameters(name, X_train, y_train, column_groups, args)
+                    tuned_params[name] = params
+                except Exception as exc:
+                    print(f"  Skipping {name}: {exc}")
+
+        curves = evaluate_curves(tuned_params, column_groups, X_train, y_train, X_test, y_test, ensemble_sizes, args)
         summary[dataset.name] = curves
         plot_results(dataset.name, ensemble_sizes, curves, ax)
 

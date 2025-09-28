@@ -437,8 +437,14 @@ def main():
     ap.add_argument(
         "--plot-combined",
         action="store_true",
-        default=True,
+        dest='plot_combined',
         help="Combine model and point distributions into two rows when plotting.",
+    )
+    ap.add_argument(
+        "--plot-separate",
+        action="store_false",
+        dest='plot_combined',
+        help="Separate model and point distributions into four rows when plotting.",
     )
     args = ap.parse_args()
 
