@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import inspect
+from typing import Optional
 
 try:
     from tqdm import tqdm
@@ -40,6 +41,123 @@ def make_friedman(n, rng):
     f = -5 + (10*np.sin(np.pi*X[:,0]) - 5*np.cos(np.pi*X[:,1])
           + 20*(X[:,2]-0.5)**2 + 10*X[:,3] - 5*X[:,4])
     return X, f
+
+
+def _plot_distribution(ax, data, color, title, xlabel, target=None):
+    try:
+        import matplotlib.cm as cm
+        cm.register_cmap = lambda *args, **kwargs: None
+        import ptitprince as pt
+    except Exception as e:  # pragma: no cover - optional dependency
+        pt = None
+        print(e)
+        print('ptitprince import failed, falling back to')
+        try:
+            import seaborn as sns
+        except Exception:
+            sns = None
+
+    data = np.asarray(data, dtype=float)
+    if data.size == 0:
+        ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center")
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel(xlabel, fontsize=10)
+        return
+
+    if pt is not None:
+        df_plot = pd.DataFrame({"group": "value", "value": data})
+        pt.RainCloud(
+            x="group",
+            y="value",
+            data=df_plot,
+            palette=[color],
+            bw=0.3,
+            width_box=0.25,
+            orient="h",
+            ax=ax,
+            alpha=1,
+            dodge=True,
+            box_showfliers = False,
+            point_size=2.5,
+            move=0.05,
+        )
+        ax.set_yticks([])
+        ax.set_ylabel("")
+    elif 'sns' in locals() and sns is not None:
+        sns.violinplot(x=data, ax=ax, orient="h", color=color, inner=None)
+        sns.boxplot(x=data, ax=ax, orient="h", color="white", width=0.15)
+        sns.stripplot(x=data, ax=ax, orient="h", color=color, size=3, alpha=0.6)
+    else:
+        ax.hist(data, bins=20, density=True, color=color, alpha=0.7)
+        ax.scatter(data, np.zeros_like(data), color=color, alpha=0.4, s=8)
+
+    if target is not None:
+        ax.axvline(target, linestyle="--", color="black", linewidth=1)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(xlabel, fontsize=10)
+
+
+def build_interval_plot(
+    df_models: pd.DataFrame,
+    df_points: pd.DataFrame,
+    level: float,
+    output: Optional[str],
+    show: bool,
+    combined: bool = False,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as ex:  # pragma: no cover - plotting optional
+        print(f"Cannot create plot because matplotlib is not available: {ex}")
+        return
+    plt.style.use('matplotlibrc')
+
+    modes = [
+        ("Built-In Confidence Interval", "cov_ci", "w_ci", "#00BEFF"),
+        ("Built-In Prediction Interval", "cov_pi", "w_pi", "#F8766D"),
+        ("Built-In Reproduction Interval", "cov_ri", "w_ri", "#7CAE00"),
+    ]
+
+    n_rows = 2 if combined else 4
+    fig, axes = plt.subplots(
+        n_rows,
+        len(modes),
+        figsize=(3 * len(modes), 4 if combined else 8),
+    )
+    if axes.ndim == 1:
+        axes = axes[:, None]
+
+    for col, (title, cov_col, width_col, color) in enumerate(modes):
+        model_coverages = df_models[cov_col].to_numpy()
+        model_widths = df_models[width_col].to_numpy()
+        point_coverages = df_points.groupby("pt")[cov_col].mean().to_numpy()
+        point_widths = df_points.groupby("pt")[width_col].mean().to_numpy()
+
+        if combined:
+            coverages = np.concatenate([model_coverages, point_coverages])
+            widths = np.concatenate([model_widths, point_widths])
+            _plot_distribution(axes[0, col], coverages, color, title, "Coverage", target=level)
+            #axes[0, col].set_ylabel("Models + Points", fontsize=10)
+            _plot_distribution(axes[1, col], widths, color, "", "Width")
+            #axes[1, col].set_ylabel("Models + Points", fontsize=10)
+        else:
+            _plot_distribution(axes[0, col], model_coverages, color, title, "Coverage", target=level)
+            axes[0, col].set_ylabel("Models", fontsize=10)
+
+            _plot_distribution(axes[1, col], model_widths, color, "Width", "Width")
+            axes[1, col].set_ylabel("Models", fontsize=10)
+
+            _plot_distribution(axes[2, col], point_coverages, color, "Coverage", "Coverage", target=level)
+            axes[2, col].set_ylabel("Points", fontsize=10)
+
+            _plot_distribution(axes[3, col], point_widths, color, "Width", "Width")
+            axes[3, col].set_ylabel("Points", fontsize=10)
+    plt.tight_layout()
+    if output:
+        fig.savefig(output, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
 
 def split3(X, y, rng, cal_frac=0.2, test_frac=0.3):
     n = X.shape[0]
@@ -228,22 +346,39 @@ def run_rep(rep, args, base_seed=0):
     w_ci = float(np.mean(ci_u - ci_l))
     w_pi = float(np.mean(pi_u - pi_l))
     w_ri = float(np.mean(ri_u - ri_l))
-    return (dict(rep=rep, cov_ci=cov_ci, cov_pi=cov_pi, cov_ri=cov_ri,
-                w_ci=w_ci, w_pi=w_pi, w_ri=w_ri, sigma=sigma), 
-            pd.DataFrame({'rep'  : rep,
-                          'pt'   : np.arange(len(Xte)),
-                          'ci_l' : ci_l,    'ci_u' : ci_u, 
-                          'pi_l' : pi_l,    'pi_u' : pi_u,
-                          'ri_l' : ri_l,    'ri_u' : ri_u,
-                          'cov_ci' : (f_te >= ci_l) & (f_te <= ci_u),
-                          'cov_pi' : (yte  >= pi_l) & (yte  <= pi_u),
-                          'cov_ri' : (yhat_te >= ri_l) & (yhat_te <= ri_u),
-                          'w_ci' : ci_u - ci_l,
-                          'w_pi' : pi_u - pi_l,
-                          'w_ri' : ri_u - ri_l,
-                          'f'    : f_te,    'y'    : yte, 
-                          'yhat' : yhat, 'yhat_te' : yhat_te
-                          })
+    return (
+        dict(
+            rep=rep,
+            cov_ci=cov_ci,
+            cov_pi=cov_pi,
+            cov_ri=cov_ri,
+            w_ci=w_ci,
+            w_pi=w_pi,
+            w_ri=w_ri,
+            sigma=sigma,
+        ),
+        pd.DataFrame(
+            {
+                "rep": rep,
+                "pt": np.arange(len(Xte)),
+                "ci_l": ci_l,
+                "ci_u": ci_u,
+                "pi_l": pi_l,
+                "pi_u": pi_u,
+                "ri_l": ri_l,
+                "ri_u": ri_u,
+                "cov_ci": (f_te >= ci_l) & (f_te <= ci_u),
+                "cov_pi": (yte >= pi_l) & (yte <= pi_u),
+                "cov_ri": (yhat_te >= ri_l) & (yhat_te <= ri_u),
+                "w_ci": ci_u - ci_l,
+                "w_pi": pi_u - pi_l,
+                "w_ri": ri_u - ri_l,
+                "f": f_te,
+                "y": yte,
+                "yhat": yhat,
+                "yhat_te": yhat_te,
+            }
+        ),
     )
 
 def main():
@@ -278,15 +413,33 @@ def main():
     )
     ap.add_argument("--n-jobs", type=int, default=-2)
     ap.add_argument("--outer-bags", type=int, default=14)
-    ap.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1.0)
+    ap.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=0.8)
     ap.add_argument("--truncation", type=float, default=100.0)
-    ap.add_argument("--reps", type=int, default=8)
+    ap.add_argument("--reps", type=int, default=50)
     ap.add_argument("--level", type=float, default=0.95)
     ap.add_argument("--use-nystrom", dest="use_nystrom", action="store_true")
+    ap.add_argument("--no-nystrom", dest="use_nystrom", action="store_false")
     ap.add_argument("--nystrom-rank", dest="nystrom_rank", type=int, default=64)
     ap.add_argument("--nystrom-ridge", dest="nystrom_ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="coverage.csv")
     ap.add_argument("--out-summary", dest='out_summary', type=str, default="coverage_summary.csv")
+    ap.add_argument(
+        "--plot",
+        type=str,
+        default='plots/coverage_rates.png',
+        help="Optional path to save a coverage/width summary plot (requires matplotlib).",
+    )
+    ap.add_argument(
+        "--plot-show",
+        action="store_true",
+        help="Display the coverage/width plot interactively after saving.",
+    )
+    ap.add_argument(
+        "--plot-combined",
+        action="store_true",
+        default=True,
+        help="Combine model and point distributions into two rows when plotting.",
+    )
     args = ap.parse_args()
 
     max_workers = min(args.reps, os.cpu_count() or 1)
@@ -309,8 +462,22 @@ def main():
     rows.sort(key=lambda entry: entry["rep"])
     df = pd.DataFrame(rows)
     df.to_csv(args.out_summary, index=False)
-    pd.concat(dfs).sort_values(['rep', 'pt']).to_csv(args.out, index=False)
+    points_df = pd.concat(dfs, ignore_index=True).sort_values(['rep', 'pt'])
+    points_df.to_csv(args.out, index=False)
     print(df.describe())
+
+    if args.plot or args.plot_show:
+        output_path = args.plot
+        if output_path:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        build_interval_plot(
+            df,
+            points_df,
+            level=args.level,
+            output=output_path,
+            show=args.plot_show,
+            combined=args.plot_combined,
+        )
 
 if __name__ == "__main__":
     main()

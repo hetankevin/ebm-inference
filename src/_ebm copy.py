@@ -4749,6 +4749,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         n_features = len(self.train_bins_by_feat_)
         counts_list: List[np.ndarray] = []
         probs_list: List[np.ndarray] = []
+        inv_list: List[np.ndarray] = []
         sum_y_list: List[np.ndarray] = []
 
         for j in range(n_features):
@@ -4756,6 +4757,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             if bins_j.size == 0:
                 counts_list.append(np.zeros(0, dtype=float))
                 probs_list.append(np.zeros(0, dtype=float))
+                inv_list.append(np.zeros((0, 0), dtype=float))
                 sum_y_list.append(np.zeros(0, dtype=float))
                 continue
 
@@ -4773,13 +4775,23 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                 minlength=m,
             ).astype(float)
 
+            with np.errstate(divide="ignore", invalid="ignore"):
+                inv_counts = np.where(counts > 0, 1.0 / counts, 0.0)
+            # Tree kernels assign ``1 / count`` mass within each bin; aggregating
+            # these onto the bin basis yields a diagonal matrix with entries
+            # ``1 / count``.
+            Sigma = np.diag(inv_counts)
+            I_plus_sigma = np.eye(m, dtype=float) + Sigma
+            inv = _eigh_pinv_psd(I_plus_sigma, tol=1e-12)
+
             counts_list.append(counts)
             probs_list.append(probs)
+            inv_list.append(inv)
             sum_y_list.append(sum_y)
 
         self.bin_counts_list_ = counts_list
         self.bin_probs_list_ = probs_list
-        self.bin_inv_i_plus_k_list_ = [None] * n_features
+        self.bin_inv_i_plus_k_list_ = inv_list
         self.bin_sum_y_list_ = sum_y_list
         self._bin_stats_ready_ = True
 
@@ -4787,23 +4799,22 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         """Return the per-feature bin-space row used for influence calculations."""
         self._ensure_bin_stats()
 
-        counts = self.bin_counts_list_[feature_idx]
-        length = counts.size
+        probs = self.bin_probs_list_[feature_idx]
+        inv = self.bin_inv_i_plus_k_list_[feature_idx]
+        length = probs.size
         if length == 0:
             return np.zeros(0, dtype=float)
 
         bin_idx = self._resolve_new_bin(feature_idx, value)
-        n_samples = self.train_X_.shape[0]
-        # Theorem A.1 implies ``r^{(k)}(x) = D_k^{-1} e_{bin(x)} - 1/n`` in the
-        # compressed bin basis (with ``D_k`` the diagonal matrix of bin counts).
-        row_local = np.full(length, -1.0 / max(n_samples, 1), dtype=float)
+        basis = np.zeros(length, dtype=float)
         if 0 <= bin_idx < length:
-            count = counts[bin_idx]
-            if count > 0:
-                row_local[bin_idx] += 1.0 / count
-            else:
-                # If the resolved bin is empty, fall back to zeros.
-                row_local[:] = 0.0
+            basis[bin_idx] = 1.0
+        centered = basis - probs
+        if inv.size:
+            row_local = centered @ inv
+        else:
+            row_local = centered
+        row_local = np.asarray(row_local, dtype=float)
         row_local[~np.isfinite(row_local)] = 0.0
         return row_local
 
@@ -4819,6 +4830,9 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             Normalised bin frequencies (summing to 1).
         ``bin_sum_y_list_[k]``
             Sum of training targets assigned to each bin.
+        ``bin_inv_i_plus_k_list_[k]``
+            Dense inverse of ``I + Σ`` for feature ``k``, where ``Σ`` is the
+            centred covariance of the one-hot bin indicators.
 
         The attribute ``bin_offsets_`` stores the cumulative offsets needed to
         slice the flattened bin-space r-vectors.
@@ -4949,15 +4963,19 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         Returns
         -------
         float
-            ``ℓ2`` norm in sample space recovered from the per-bin representation.
+            Approximation of ``‖row‖`` obtained by weighting each bin entry by
+            the corresponding empirical count.
         """
         total = 0.0
-        for j, counts in enumerate(self.bin_counts_list_):
+        for j, probs in enumerate(self.bin_probs_list_):
+            # gets you the bins for the feature
             sl = self._feature_bin_slice(j)
+            # r-vector entries for feature j. length n-bins-for-feature-j
             seg = row[sl]
             if seg.size == 0:
                 continue
-            total += np.sum((seg ** 2) * counts)
+            # we take a weighted norm here per bin occupancies
+            total += np.sum((seg ** 2) * probs)
         return float(np.sqrt(max(total, 0.0)))
 
     def _bin_dot_y(self, row: np.ndarray) -> float:
@@ -4971,16 +4989,20 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         Returns
         -------
         float
-            Exact dot product ``row @ y_train`` reconstructed from per-bin statistics.
+            Approximation of ``row @ y_train`` derived from per-bin average
+            targets.
         """
         acc = 0.0
-        for j, counts in enumerate(self.bin_counts_list_):
+        for j, probs in enumerate(self.bin_probs_list_):
+            # gets you the bins for the feature
             sl = self._feature_bin_slice(j)
+            # r-vector entries for feature j. length n-bins-for-feature-j
             seg = row[sl]
             if seg.size == 0:
                 continue
+            # y-vector entries for bins in feature j. length n-bins-for-feature-j
             sum_y = self.bin_sum_y_list_[j]
-            acc += float(np.dot(seg, sum_y))
+            acc += np.dot(seg * probs, sum_y)
         return float(acc)
 
     def _bin_inner_product(self, a: np.ndarray, b: np.ndarray) -> float:
@@ -4994,16 +5016,16 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         Returns
         -------
         float
-            Inner product consistent with the sample-space formulation.
+            Weighted inner product used inside the bin-level inference path.
         """
         total = 0.0
-        for j, counts in enumerate(self.bin_counts_list_):
+        for j, probs in enumerate(self.bin_probs_list_):
             sl = self._feature_bin_slice(j)
             seg_a = a[sl]
             seg_b = b[sl]
             if seg_a.size == 0:
                 continue
-            total += np.sum((seg_a * seg_b) * counts)
+            total += np.sum((seg_a * seg_b) * probs)
         return float(total)
 
     def _build_nystrom(self, d=None, seed=None, ridge=None):
@@ -5144,12 +5166,12 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                 for Sk in self.Kk_
             ]
 
-        # Aggregated kernel K_n = Σ_k (I - S_k)^† (I - 11^T / n) S_k
+        # Accumulate the exact kernel K = Σ_k (I - S_k) J (I - S_k).
+        identity = np.eye(n, dtype=float)
         K = np.zeros((n, n), dtype=float)
-        for Sk, Ik in zip(self.Kk_, self.pinv_Ik_):
-            K += Ik @ self.J_ @ Sk
-
-        self.kernel_matrix_ = K
+        for Sk in self.Kk_:
+            I_minus_Sk = identity - Sk
+            K += I_minus_Sk @ self.J_ @ I_minus_Sk
 
         A = np.eye(n, dtype=float) + K
         w, V = np.linalg.eigh(A)
@@ -5214,15 +5236,11 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             return np.zeros(n, dtype=float)
 
         bins_train = self.train_bins_by_feat_[feature_idx]
-        sample_row = np.zeros(n, dtype=float)
-        if row_local.size:
-            sample_row = row_local[bins_train]
-
+        sample_row = row_local[bins_train] / np.sqrt(n)
+        sample_row = np.asarray(sample_row, dtype=float)
         sample_row -= np.mean(sample_row)
         sample_row[~np.isfinite(sample_row)] = 0.0
-        contrib = self._inv_apply_row(sample_row)
-        contrib[~np.isfinite(contrib)] = 0.0
-        return contrib
+        return sample_row
 
     def _feature_bin_influence(self, feature_idx: int, value: float) -> Tuple[slice, np.ndarray]:
         """Bin-space influence block produced by a single feature/value pair."""
@@ -5238,92 +5256,6 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             return sl, row_local
         return sl, row_local
 
-
-    def _r_vector(self, x, inference_space: Optional[str] = None):
-        """Compute the influence vector ``r(x)`` in either sample or bin space.
-
-        Parameters
-        ----------
-        x : array-like of shape (n_features,)
-            Feature vector for the query sample.
-        inference_space : {"auto", "samples", "bins"} or None, optional
-            Controls whether the sample-space or bin-space formulation is used.
-            ``None``/``"auto"`` defer to ``bin_level_inference``.
-
-        Returns
-        -------
-        numpy.ndarray
-            Influence vector whose shape depends on the chosen space: ``(n_samples,)``
-            for sample space, ``(n_total_bins,)`` for bin space.
-
-        Raises
-        ------
-        RuntimeError
-            If the requested space is unavailable (e.g. bin-space data were not
-            built) or the sample-space kernels have not been initialised.
-        """
-        if inference_space is None:
-            inference_space = "bins" if self.bin_level_inference else "samples"
-
-        if inference_space == "bins":
-            if not self.bin_level_inference:
-                raise RuntimeError("Bin-level inference requested but bin structures are unavailable.")
-            return self._r_vector_bins(x)
-
-        n = self.train_X_.shape[0]
-        r_row = np.zeros(n, dtype=float)
-        for j, val in enumerate(x):
-            r_row += self._feature_sample_influence(j, float(val))
-        r_row[~np.isfinite(r_row)] = 0.0
-        return r_row
-
-    def _r_vector_bins(self, x, active_features: Optional[Sequence[int]] = None) -> np.ndarray:
-        """Construct the bin-space influence vector for ``x``.
-
-        Parameters
-        ----------
-        x : array-like of shape (n_features,)
-            Feature vector for the query sample.
-        active_features : sequence of int or None, optional
-            Optional subset of feature indices to include. When ``None`` all
-            features contribute.
-
-        Returns
-        -------
-        numpy.ndarray of shape (n_total_bins,)
-            Flattened vector whose blocks correspond to the per-feature bin
-            contributions.
-
-        Raises
-        ------
-        RuntimeError
-            If bin-level structures have not been initialised via
-            :meth:`_build_bin_level_structures`.
-        """
-        if self.bin_offsets_ is None:
-            raise RuntimeError("Bin-level structures are not initialized.")
-
-        r = np.zeros(self.bin_total_bins_, dtype=float)
-        active_set = None if active_features is None else set(active_features)
-
-        for j in range(len(self.train_bins_by_feat_)):
-            if active_set is not None and j not in active_set:
-                continue
-            sl, block = self._feature_bin_influence(j, float(x[j]))
-            if block.size:
-                r[sl] = block
-
-        return r
-
-    def _r_vector_feature(self, feature_idx: int, value: float, inference_space: str) -> np.ndarray:
-        """Return the influence vector contributed by a single feature/value pair."""
-        if inference_space == "bins":
-            r = np.zeros(self.bin_total_bins_, dtype=float)
-            sl, block = self._feature_bin_influence(feature_idx, value)
-            if block.size:
-                r[sl] = block
-            return r
-        return self._feature_sample_influence(feature_idx, value)
     
     def predict_intervals(self, X, level=0.95, mode="prediction", sigma=None, inference_space: Optional[str] = None):
         """Compute confidence, prediction, or reproduction intervals.
@@ -5482,11 +5414,13 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         lower = np.empty_like(preds, dtype=float)
         upper = np.empty_like(preds, dtype=float)
 
+        if space == "bins":
+            probs = self.bin_probs_list_[feature_idx]
+
         for idx, val in enumerate(x_k):
             if space == "bins":
                 sl, block = self._feature_bin_influence(feature_idx, float(val))
-                counts = self.bin_counts_list_[feature_idx]
-                r_norm = np.sqrt(np.sum((block ** 2) * counts)) if block.size else 0.0
+                r_norm = np.sqrt(np.sum((block ** 2) * probs)) if block.size else 0.0
             else:
                 vec = self._feature_sample_influence(feature_idx, float(val))
                 r_norm = float(np.linalg.norm(vec)) if vec.size else 0.0
@@ -5504,6 +5438,91 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
 
         return lower, upper, preds
     
+    def _r_vector(self, x, inference_space: Optional[str] = None):
+        """Compute the influence vector ``r(x)`` in either sample or bin space.
+
+        Parameters
+        ----------
+        x : array-like of shape (n_features,)
+            Feature vector for the query sample.
+        inference_space : {"auto", "samples", "bins"} or None, optional
+            Controls whether the sample-space or bin-space formulation is used.
+            ``None``/``"auto"`` defer to ``bin_level_inference``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Influence vector whose shape depends on the chosen space: ``(n_samples,)``
+            for sample space, ``(n_total_bins,)`` for bin space.
+
+        Raises
+        ------
+        RuntimeError
+            If the requested space is unavailable (e.g. bin-space data were not
+            built) or the sample-space kernels have not been initialised.
+        """
+        if inference_space is None:
+            inference_space = "bins" if self.bin_level_inference else "samples"
+
+        if inference_space == "bins":
+            if not self.bin_level_inference:
+                raise RuntimeError("Bin-level inference requested but bin structures are unavailable.")
+            return self._r_vector_bins(x)
+
+        n = self.train_X_.shape[0]
+        r_row = np.zeros(n, dtype=float)
+        for j, val in enumerate(x):
+            r_row += self._feature_sample_influence(j, float(val))
+        r_row[~np.isfinite(r_row)] = 0.0
+        return r_row
+
+    def _r_vector_bins(self, x, active_features: Optional[Sequence[int]] = None) -> np.ndarray:
+        """Construct the bin-space influence vector for ``x``.
+
+        Parameters
+        ----------
+        x : array-like of shape (n_features,)
+            Feature vector for the query sample.
+        active_features : sequence of int or None, optional
+            Optional subset of feature indices to include. When ``None`` all
+            features contribute.
+
+        Returns
+        -------
+        numpy.ndarray of shape (n_total_bins,)
+            Flattened vector whose blocks correspond to the per-feature bin
+            contributions.
+
+        Raises
+        ------
+        RuntimeError
+            If bin-level structures have not been initialised via
+            :meth:`_build_bin_level_structures`.
+        """
+        if self.bin_offsets_ is None:
+            raise RuntimeError("Bin-level structures are not initialized.")
+
+        r = np.zeros(self.bin_total_bins_, dtype=float)
+        active_set = None if active_features is None else set(active_features)
+
+        for j in range(len(self.train_bins_by_feat_)):
+            if active_set is not None and j not in active_set:
+                continue
+            sl, block = self._feature_bin_influence(j, float(x[j]))
+            if block.size:
+                r[sl] = block
+
+        return r
+
+    def _r_vector_feature(self, feature_idx: int, value: float, inference_space: str) -> np.ndarray:
+        """Return the influence vector contributed by a single feature/value pair."""
+        if inference_space == "bins":
+            r = np.zeros(self.bin_total_bins_, dtype=float)
+            sl, block = self._feature_bin_influence(feature_idx, value)
+            if block.size:
+                r[sl] = block
+            return r
+        return self._feature_sample_influence(feature_idx, value)
 
     def variable_importance_test(self, X: np.ndarray, y: np.ndarray, groups: List[int], level: float = 0.95):
         """Perform a held-out chi-square style variable-importance test.
