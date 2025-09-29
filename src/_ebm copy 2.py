@@ -16,10 +16,9 @@ from multiprocessing.managers import SharedMemoryManager
 from operator import itemgetter
 from typing import Optional, Union, List, Dict, Tuple
 from warnings import warn
-from tqdm import tqdm
 
 import numpy as np
-from joblib import Parallel, delayed, effective_n_jobs
+from joblib import Parallel, delayed
 from sklearn.base import (
     BaseEstimator,
     ClassifierMixin,
@@ -39,7 +38,7 @@ from ...utils._clean_simple import (
     typify_classification,
 )
 from ...utils._clean_x import preclean_X
-from ...utils._compressed_dataset import bin_native, bin_native_by_dimension
+from ...utils._compressed_dataset import bin_native_by_dimension
 from ...utils._explanation import (
     gen_global_selector,
     gen_local_selector,
@@ -51,7 +50,7 @@ from ...utils._link import inv_link, link_func
 from ...utils._measure_mem import total_bytes
 from ...utils._misc import clean_index, clean_indexes
 from ...utils._native import Native
-from ...utils._preprocessor import construct_bins, EBMPreprocessor
+from ...utils._preprocessor import construct_bins
 from ...utils._privacy import (
     calc_classic_noise_multi,
     calc_gdp_noise_multi,
@@ -67,7 +66,6 @@ from ._bin import (
     make_bin_weights,
 )
 from ._boost import boost
-from ...utils._native import Booster
 from ._json import UNTESTED_from_jsonable, to_jsonable
 from ._tensor import remove_last, trim_tensor
 from ._utils import (
@@ -77,10 +75,14 @@ from ._utils import (
     order_terms,
     process_terms,
     remove_extra_bins,
-    _eigh_pinv_psd,
+    _assign_bins,
     _auto_bins_for_numeric,
-    _greedy_bin_segments,
+    _digitize_edges,
+    _eigh_pinv_psd,
+    _fit_adaptive_binning,
+    _merge_small_bins,
     _post_fit_recenter,
+    _quantile_edges
 )
 
 _log = logging.getLogger(__name__)
@@ -4016,7 +4018,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         the subset G_{b,k}. This subsampling is crucial for the statistical inference properties.
         Higher values mean more samples are included for each feature, while lower values increase
         the subsampling effect. Typical values range from 0.5 to 0.8.
-    truncation : float, default=100.0
+    truncation : float, default=2.0
         Truncation parameter M for limiting tree predictions to [-M, M] range.
         This parameter controls the maximum absolute value of tree predictions after
         mean-centering. The truncation is applied as: max{-M, min{tilde_t^(b,k)(x), M}}.
@@ -4153,9 +4155,6 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
     _nys_M: Optional[np.ndarray]  # np.float64, 2D[landmark, landmark] - Woodbury matrix M
     _nys_landmarks: Optional[np.ndarray]  # np.int64, 1D[landmark] - landmark indices
 
-
-    auto_bins_scheme: str
-
     # TODO PK v.3 use underscores here like RegressorMixin._estimator_type?
     available_explanations = ("global", "local", "confidence", "prediction_intervals")
     explainer_type = "inferable_model"
@@ -4179,11 +4178,10 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         outer_bags: int = 8,
         inner_bags: Optional[int] = 0,
         # Boosting
-        learning_rate: float = 0.1,
+        learning_rate: float = 0.02,
         max_rounds: Optional[int] = 200,
         early_stopping_rounds: Optional[int] = 50,
         early_stopping_tolerance: Optional[float] = 1e-5,
-        warmup_rounds: int = 20,
         # Trees
         min_samples_leaf: Optional[int] = 5,
         reg_alpha: Optional[float] = 0.01,
@@ -4206,7 +4204,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         min_bins_auto: int = 8,
         auto_bins_scheme: str = "quantile",
         # Statistical inference representation
-        bin_level_inference: bool = True,
+        bin_level_inference: bool = False,
     ):
         """Initialise the Inferable EBM with boulevard-style defaults and inference knobs.
 
@@ -4237,8 +4235,9 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         inner_bags : int or None, default=0
             Number of inner bagging loops per boosting step (``0`` disables
             inner bagging).
-        learning_rate : float, default=0.1
-            Learning rate for both warm-starting rounds and Boulevard rounds.
+        learning_rate : float, default=0.02
+            Compatibility argument; the inferable variant internally uses a
+            boulevard learning rate of 1.0.
         max_rounds : int or None, default=200
             Maximum number of boosting rounds (each round sequentially visits
             every feature once).
@@ -4263,14 +4262,9 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         subsample_rate : float, default=1.0
             Subsampling probability ξ used when selecting samples per feature
             and round.
-        truncation : float, default=100.0
+        truncation : float, default=3.0
             Absolute value clipping applied to every feature update to keep
             boulevard averages bounded.
-        warmup_rounds : int, default=20
-            Number of initial rounds that use additive updates (no 1/t
-            averaging). Subsequent rounds follow the Boulevard 1/t averaging
-            scheme. This can reduce early underfitting on some datasets while
-            preserving Boulevard-style stability.
         honest : bool, default=False
             Placeholder for honest tree splits. Behaviour matches the base class
             when ``False``.
@@ -4314,7 +4308,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             outer_bags=outer_bags,
             inner_bags=inner_bags,
             # Boosting - CRITICAL: learning_rate=1.0 for Boulevard averaging
-            learning_rate=learning_rate,  # Pure Boulevard averaging, no learning rate damping
+            learning_rate=1.0,  # Pure Boulevard averaging, no learning rate damping
             greedy_ratio=0.0,  # Pure cyclic boosting
             cyclic_progress=1.0,
             smoothing_rounds=0,  # No smoothing for statistical inference
@@ -4350,10 +4344,8 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         )
         
         # Store statistical inference specific parameters
-        self.boulevard_scale = (1+self.learning_rate)/self.learning_rate
         self.subsample_rate = subsample_rate
         self.truncation = truncation
-        self.warmup_rounds = int(max(0, warmup_rounds))
         self.honest = honest
         self.min_bin_count = min_bin_count
         self.use_nystrom = use_nystrom
@@ -4361,14 +4353,10 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         self.nystrom_ridge = nystrom_ridge
         self.max_bins_auto = max_bins_auto
         self.min_bins_auto = min_bins_auto
-        self.auto_bins_scheme = auto_bins_scheme
-        normalized_scheme = (auto_bins_scheme or "quantile").lower()
-        if normalized_scheme not in {"quantile", "cube", "count"}:
+        self.auto_bins_scheme = (auto_bins_scheme or "quantile").lower()
+        if self.auto_bins_scheme not in {"quantile", "cube", "count"}:
             raise ValueError("auto_bins_scheme must be 'quantile', 'cube', or 'count'")
-        self._auto_bins_scheme = normalized_scheme
         self.bin_level_inference = bin_level_inference
-        # Warmup rounds: additive updates before Boulevard averaging
-        self.warmup_rounds = int(max(0, warmup_rounds))
         
         # Initialize statistical inference attributes
         self.Kk_ = []
@@ -4395,333 +4383,61 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
 
         # Interval calibration cache: keyed by (mode, level, space)
         self.interval_calibrations_: Dict[Tuple[str, float, str], float] = {}
-        self._feature_term_map_: Dict[int, int] = {}
-
-    def fit(self, X, y, sample_weight=None, bags=None, init_score=None):
-        """Fit the inferable EBM using Algorithm 1 with native tree updates."""
-
-        if bags is not None:
-            raise NotImplementedError("Custom bag assignments are not supported in InferableEBMRegressor.")
-        if init_score is not None:
-            raise NotImplementedError("init_score is not supported in InferableEBMRegressor.")
-
-        X = np.asarray(X)
-        y = np.asarray(y, dtype=float)
-        if X.ndim != 2:
-            raise ValueError("X must be a 2D array.")
-        if y.ndim != 1:
-            raise ValueError("y must be 1D.")
-        if X.shape[0] != y.shape[0]:
-            raise ValueError("X and y must contain the same number of samples.")
-
-        n_samples, n_features = X.shape
-
-        if sample_weight is not None:
-            sample_weight = np.asarray(sample_weight, dtype=float)
-            if sample_weight.ndim != 1:
-                raise ValueError("sample_weight must be 1D.")
-            if sample_weight.shape[0] != n_samples:
-                raise ValueError("sample_weight length must match the number of samples in X.")
-
-        # RNG bookkeeping and cached training copies
-        self.rng_ = np.random.default_rng(self.random_state)
-        self.train_X_ = X.copy()
-        self.train_y_ = y.copy()
-        self.interval_calibrations_.clear()
-
-
-        sample_count = self.train_X_.shape[0]
-        max_bins = getattr(self, "max_bins", 0)
-        if max_bins == 0:
-            min_bins_auto = getattr(self, "min_bins_auto", 8)
-            max_bins_auto = getattr(self, "max_bins_auto", 512)
-            auto_scheme = getattr(self, "_auto_bins_scheme", "quantile")
-            adaptive_bins = _auto_bins_for_numeric(
-                sample_count,
-                min_bins_auto=min_bins_auto,
-                max_bins_auto=max_bins_auto,
-                scheme=auto_scheme,
-            )
-        else:
-            adaptive_bins = max_bins
-        # Native binning (main effects only)
-        binning_result = construct_bins(
-            X=X,
-            y=y,
-            sample_weight=sample_weight,
-            feature_names_given=self.feature_names,
-            feature_types_given=self.feature_types,
-            max_bins_leveled=[int(adaptive_bins)],
-            binning="quantile",
-            min_samples_bin=1,
-            min_unique_continuous=0,
-            seed=normalize_seed(self.random_state),
-        )
-
-        (
-            feature_names_in,
-            feature_types_in,
-            bins,
-            main_bin_weights,
-            feature_bounds,
-            histogram_weights,
-            missing_val_counts,
-            unique_val_counts,
-            noise_scale,
-        ) = binning_result
-
-        self.feature_names_in_ = feature_names_in
-        self.feature_types_in_ = feature_types_in
-        self.bins_ = bins
-        self.bin_weights_ = main_bin_weights
-        self.feature_bounds_ = feature_bounds
-        self.histogram_weights_ = histogram_weights
-        self.missing_val_counts_ = missing_val_counts
-        self.unique_val_counts_ = unique_val_counts
-        self.noise_scale_ = noise_scale
-        self.histogram_edges_ = make_all_histogram_edges(
-            self.feature_bounds_, self.histogram_weights_
-        )
-        # Regression link function is identity.
-        self.link_ = "identity"
-        self.link_param_ = 0.0
-
-        self.term_features_ = [(j,) for j in range(len(feature_names_in))]
-        self.term_names_ = generate_term_names(self.feature_names_in_, self.term_features_)
-        self.term_types_ = generate_term_types(self.feature_types_in_, self.term_features_)
-        remove_extra_bins(self.term_features_, self.bins_)
-
-        # Allocate per-feature scores (bins already include missing/unseen bins)
-        self.term_scores_ = [
-            np.zeros_like(bin_w, dtype=float)
-            for bin_w in self.bin_weights_
-        ]
-
-        # Map training data to bins using the native preprocessor artefacts
-        preproc = EBMPreprocessor()
-        preproc.feature_names_in_ = self.feature_names_in_
-        preproc.feature_types_in_ = self.feature_types_in_
-        preproc.bins_ = [levels[0] for levels in self.bins_]
-        preproc.has_fitted_ = True
-
-        train_bins_matrix = preproc.transform(X)
-        self.train_bins_matrix_ = train_bins_matrix
-        self.train_bins_by_feat_ = [
-            train_bins_matrix[:, j].astype(np.int64, copy=False)
-            for j in range(n_features)
-        ]
-
-        # Prepare native datasets (one per feature) to reuse inside the boosting loop
-        native_datasets = []
-        shared_handles = []
-        for feat_idx in range(n_features):
-            shared = SharedDataset()
-            bin_native(
-                Native.Task_Regression,
-                [feat_idx],
-                [self.bins_[feat_idx][0]],
-                X,
-                y,
-                sample_weight,
-                self.feature_names_in_,
-                self.feature_types_in_,
-                shared,
-            )
-            native_datasets.append(shared.dataset)
-            shared_handles.append(shared)
-
-        # Pre-compute per-bin weights (counts) used for centring/intercept updates
-        if sample_weight is None:
-            bin_counts = [
-                np.bincount(self.train_bins_by_feat_[j], minlength=self.term_scores_[j].shape[0]).astype(float)
-                for j in range(n_features)
-            ]
-        else:
-            bin_counts = [
-                np.bincount(
-                    self.train_bins_by_feat_[j],
-                    weights=sample_weight,
-                    minlength=self.term_scores_[j].shape[0],
-                ).astype(float)
-                for j in range(n_features)
-            ]
-
-        # Initial intercept/predictions
-        self.intercept_ = float(np.mean(y))
-        preds = np.full(n_samples, self.intercept_, dtype=float)
-
-        truncation = float(self.truncation)
-        learning_rate = float(self.learning_rate or 0.1)
-        n_float = float(n_samples)
-        max_rounds = int(self.max_rounds)
-        max_leaves = self.max_leaves if self.max_leaves is not None else 3
-        min_leaf = max(1, self.min_samples_leaf or 1)
-        min_hessian = float(self.min_hessian or 0.0)
-        reg_alpha = float(self.reg_alpha or 0.0)
-        reg_lambda = float(self.reg_lambda or 0.0)
-        max_delta_step = float(self.max_delta_step or 0.0)
-        min_cat_samples = int(self.min_cat_samples or 0)
-        cat_smooth = float(self.cat_smooth or 0.0)
-
-        # Separate accumulators: warmup part (additive) and averaged part (Boulevard)
-        warm_scores = [np.zeros_like(s, dtype=float) for s in self.term_scores_]
-        avg_scores = [np.zeros_like(s, dtype=float) for s in self.term_scores_]
-
-        # Boosting loop -----------------------------------------------------
-        for round_idx in range(1, max_rounds + 1):
-            preds_previous = preds.copy()
-
-            if self.subsample_rate < 1.0:
-                masks = []
-                for _ in range(n_features):
-                    mask = self.rng_.random(n_samples) < self.subsample_rate
-                    if not np.any(mask):
-                        mask = np.ones(n_samples, dtype=bool)
-                    masks.append(mask)
-            else:
-                full_mask = np.ones(n_samples, dtype=bool)
-                masks = [full_mask] * n_features
-
-            coeff = (round_idx - 1.0) / round_idx
-
-            def _update_feature(feat_idx, mask):
-                dataset = native_datasets[feat_idx]
-
-                bag = np.zeros(n_samples, dtype=np.int8)
-                bag[mask] = 1
-                init_scores_subset = preds_previous[mask].astype(np.float64, copy=True)
-                intercept_arr = np.array([0.0], dtype=np.float64)
-
-                with Booster(
-                    dataset,
-                    intercept_arr,
-                    bag,
-                    init_scores_subset,
-                    [(0,)],
-                    0,
-                    None,
-                    Native.CreateBoosterFlags_Default,
-                    "rmse",
-                    develop.get_option("acceleration"),
-                    None,
-                ) as booster:
-                    booster.generate_term_update(
-                        None,
-                        term_idx=0,
-                        term_boost_flags=Native.TermBoostFlags_Default,
-                        learning_rate=1,
-                        min_samples_leaf=min_leaf,
-                        min_hessian=min_hessian,
-                        reg_alpha=reg_alpha,
-                        reg_lambda=reg_lambda,
-                        max_delta_step=max_delta_step,
-                        min_cat_samples=min_cat_samples,
-                        cat_smooth=cat_smooth,
-                        max_cat_threshold=0,
-                        cat_include=1.0,
-                        max_leaves=max_leaves,
-                        monotone_constraints=None,
-                    )
-                    update_bins = booster.get_term_update()
-
-                update_bins = np.asarray(update_bins, dtype=float)
-
-                mu_local = float(np.dot(bin_counts[feat_idx], update_bins) / n_float)
-                centered = np.clip(update_bins - mu_local, -truncation, truncation)
-                # Warmup: additive updates for the first K rounds, then Boulevard 1/t averaging
-                if round_idx <= self.warmup_rounds:
-                    new_warm = warm_scores[feat_idx] + self.learning_rate * centered
-                    new_avg = avg_scores[feat_idx]
-                else:
-                    new_warm = warm_scores[feat_idx]
-                    new_avg = coeff * avg_scores[feat_idx] + (self.learning_rate / round_idx) * centered
-                return feat_idx, new_warm, new_avg, mu_local
-
-            n_jobs_effective = effective_n_jobs(self.n_jobs)
-            if n_jobs_effective <= 1:
-                results = [
-                    _update_feature(feat_idx, masks[feat_idx])
-                    for feat_idx in range(n_features)
-                ]
-            else:
-                parallel_executor = Parallel(n_jobs=self.n_jobs, prefer="threads")
-                results = parallel_executor(
-                    delayed(_update_feature)(feat_idx, masks[feat_idx])
-                    for feat_idx in range(n_features)
-                )
-
-            for feat_idx, new_warm, new_avg, mu_local in results:
-                warm_scores[feat_idx] = new_warm
-                avg_scores[feat_idx] = new_avg
-                self.term_scores_[feat_idx] = new_warm + new_avg
-
-            # Refresh the intercept so that predictions remain unbiased after applying
-            # the new feature contributions.  This mirrors the effect of Algorithm 1's
-            # intercept update without relying on the individual μ values, which can
-            # become numerically unstable when features are updated in parallel.
-            contributions = np.zeros(n_samples, dtype=float)
-            for j in range(n_features):
-                contributions += self.term_scores_[j][self.train_bins_by_feat_[j]]
-            self.intercept_ = float(np.mean(y - contributions))
-            preds = self.intercept_ + contributions
-            
-
-        for shared in shared_handles:
-            shared.reset()
-
-        # 4) Post-fit exact recenter per feature (∑ᵢfₖ(xᵢ)=0)
-        self.intercept_ = _post_fit_recenter(
-            self.intercept_, 
-            self.term_scores_, 
-            bin_counts, 
-            self.train_bins_by_feat_
-        )
-        # 4a) Boulevard correction -- only scale the averaged component
-        for j in range(n_features):
-            self.term_scores_[j] = warm_scores[j] + self.boulevard_scale * avg_scores[j]
-
-        # 5) Enforce centering + intercept consistency (additional safety)
-        self._center_terms_and_fix_intercept()
-        self.has_fitted_ = True
-        self._build_structure_matrices()
-
-        resid = self.train_y_ - self.predict(self.train_X_)
-        resid = resid[np.isfinite(resid)]
-        if resid.size > 1:
-            sigma = float(np.std(resid, ddof=1))
-        elif resid.size == 1:
-            sigma = float(np.abs(resid[0]))
-        else:
-            sigma = 1e-8
-        if not np.isfinite(sigma) or sigma <= 0:
-            sigma = 1e-8
-        self.sigma_ = sigma
-
-        return self
 
     def predict(self, X, init_score=None):
-        """Return point predictions for new samples."""
+        """Return point predictions for new samples.
 
-        check_is_fitted(self, "has_fitted_")
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Feature matrix in the same column order used during :meth:`fit`.
+            NumPy arrays are consumed directly; array-likes are converted via
+            :func:`numpy.asarray`.
+        init_score : array-like of shape (n_samples,) or None, optional
+            Optional initial scores added to the linear predictor prior to
+            applying the inverse link. ``None`` ignores this term.
 
-        scores = ebm_predict_scores(
-            *clean_X_and_init_score(
-                X,
-                init_score,
-                self.feature_names_in_,
-                self.feature_types_in_,
-                self.link_,
-                self.link_param_,
-            ),
-            self.feature_names_in_,
-            self.feature_types_in_,
-            self.bins_,
-            self.intercept_,
-            self.term_scores_,
-            self.term_features_,
-        )
+        Returns
+        -------
+        numpy.ndarray of shape (n_samples,)
+            Predicted response values in the original target scale (the
+            identity link is used for regression).
 
-        return inv_link(scores, self.link_, self.link_param_)
+        Raises
+        ------
+        RuntimeError
+            If the estimator has not been fitted.
+        ValueError
+            If ``X`` cannot be reshaped into two dimensions.
+        """
+        import numpy as np
+        X = np.asarray(X)
+        if not hasattr(self, 'has_fitted_') or not self.has_fitted_:
+            raise RuntimeError("Call fit() first.")
+
+        n, p = X.shape
+
+        # Binners for each feature (already in your class)
+        binners = self.binning_list_  # list of length p
+
+        # Term parameters that training actually updates:
+        # If your training writes to self.additive_terms_ or self.scores_, use that here.
+        term_arr = getattr(self, "term_scores_", None)
+        if term_arr is None:
+            term_arr = getattr(self, "additive_terms_", None)
+        assert term_arr is not None, "EBM: cannot find term score arrays for prediction."
+
+        out = np.full(n, float(self.intercept_), dtype=float)
+        for j in range(p):
+            # Assign new samples to bins using old structure
+            bins_old = _assign_bins(X, self.binning_list_)
+            # Map old bin ids to new bin ids
+            old_bins = bins_old[j]
+            new_bins = np.clip(self.old_to_new_map_[j][old_bins], 0, term_arr[j].shape[0]-1)
+            # Gather contribution for each sample from its bin
+            out += term_arr[j][new_bins]
+        
+        return out
 
     def _resolve_inference_space(self, inference_space: Optional[str]) -> str:
         space = inference_space or ("bins" if self.bin_level_inference else "samples")
@@ -4785,74 +4501,206 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                 base = np.sqrt(2.0) * sigma * norm
             else:
                 raise ValueError("mode must be 'confidence', 'prediction', or 'reproduction'")
-            widths[i] = self.boulevard_scale * z * base
+            widths[i] = 2.0 * z * base
 
         return preds, widths
 
+    def fit(self, X, y, sample_weight=None, bags=None, init_score=None):
+        """Train the inferable boosting model on the provided dataset.
 
-    def _initialize_training_bins(self) -> None:
-        """Construct per-feature bin assignments using native discretisers."""
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Feature matrix. Columns must be ordered consistently with any
+            ``feature_names`` provided at construction time.
+        y : array-like of shape (n_samples,)
+            Continuous target values.
+        sample_weight : array-like of shape (n_samples,), optional
+            Per-sample weights. ``None`` assigns unit weight to every sample.
+        bags : ndarray of shape (n_samples, outer_bags), optional
+            Pre-computed outer bag assignments. ``None`` triggers automatic bag
+            generation.
+        init_score : array-like of shape (n_samples,), optional
+            Baseline prediction scores to add before fitting. Mainly used for
+            advanced ensembling; typically ``None``.
 
-        if getattr(self, "feature_names_in_", None) is None:
-            self.train_bins_by_feat_ = []
-            self._main_bin_info_ = []
-            self._feature_term_map_ = {}
-            return
+        Returns
+        -------
+        InferableEBMRegressor
+            The fitted estimator instance (``self``).
 
-        # Reuse the preprocessor's native discretisation for main-effect bins
-        preproc = EBMPreprocessor(
-            feature_names=self.feature_names_in_,
-            feature_types=self.feature_types_in_,
-            max_bins=self.max_bins,
+        Notes
+        -----
+        The fitting pipeline performs the following high-level steps:
+
+        1. Adaptive binning of every feature with automatic bin merging when
+           bins fall below ``min_bin_count``.
+        2. Boulevard-style boosting with mean-centred, truncated updates.
+        3. Post-fit recentering so that each feature contribution integrates to
+           zero over the training distribution (the intercept absorbs the mean).
+        4. Construction of the statistical inference artefacts (sample-space or
+           bin-space kernels, depending on ``bin_level_inference``).
+        """
+        X = np.asarray(X)
+        y = np.asarray(y).astype(float, copy=False)
+        if X.ndim != 2:
+            raise ValueError("X must be 2D array.")
+
+        n, p = X.shape
+        self.rng_ = np.random.default_rng(self.random_state)
+        self.train_X_, self.train_y_ = X.copy(), y.copy()
+        # Interval calibrations are specific to a fitted model state.
+        self.interval_calibrations_.clear()
+        
+        # Auto min_bin_count if not provided: 1
+        min_count_eff = (self.min_bin_count if self.min_bin_count is not None 
+                        else 1)
+        
+        # 1) Adaptive binning: n_bins ≍ n^(1/3) for numeric features
+        # Use max_bins if > 0, otherwise auto schedule
+        n_bins = self.max_bins if self.max_bins > 0 else 0
+        self.binning_list_ = _fit_adaptive_binning(
+            X,
+            n_bins,
+            self.min_bins_auto,
+            self.max_bins_auto,
+            self.rng_,
+            self.auto_bins_scheme,
         )
-        preproc.feature_names_in_ = self.feature_names_in_
-        preproc.feature_types_in_ = self.feature_types_in_
-        preproc.bins_ = [levels[0] for levels in self.bins_]
-        preproc.has_fitted_ = True
+        
+        # Assign training samples to bins
+        train_bins = _assign_bins(X, self.binning_list_)
+        
+        # Merge small bins and create old→new mapping
+        self.train_bins_by_feat_ = []
+        self.old_to_new_map_ = []
+        self.new_bins_count_ = []
+        
+        for j in range(p):
+            # Merge small bins and get mapping
+            bins_new, old_to_new, m = self._merge_small_bins_and_map(
+                train_bins[j], min_count_eff
+            )
+            self.train_bins_by_feat_.append(bins_new)
+            self.old_to_new_map_.append(old_to_new)
+            self.new_bins_count_.append(m)
+        
+        # 2) Initialize intercept and per-feature shapes
+        self.intercept_ = float(np.mean(y))  # Initialize once to the mean
+        self.term_scores_ = [np.zeros(self.new_bins_count_[j], dtype=float) 
+                            for j in range(p)]
+        
+        # Per-feature training bin weights (counts in new ids)
+        bin_weights = []
+        for j in range(p):
+            counts = np.bincount(self.train_bins_by_feat_[j], 
+                               minlength=self.term_scores_[j].shape[0]).astype(float)
+            bin_weights.append(counts)
+        
+        def _pred_train_current():
+            pred = np.full(n, self.intercept_, dtype=float)
+            for j in range(p):
+                pred += self.term_scores_[j][self.train_bins_by_feat_[j]]
+            return pred
+        
+        # 3) Boulevard rounds with statistical inference modifications
+        preds = _pred_train_current()
+        n_float = float(n)
+        truncation = float(self.truncation)
+        effective_jobs = 1 if self.n_jobs in (None, 0, 1) else self.n_jobs
 
-        train_bins_matrix = preproc.transform(self.train_X_)
-        self.train_bins_matrix_ = train_bins_matrix
-        self.train_bins_by_feat_ = [
-            train_bins_matrix[:, j].astype(np.int64, copy=False)
-            for j in range(train_bins_matrix.shape[1])
-        ]
+        def _feature_update(j: int, seed: int, preds_round: np.ndarray, round_idx: int):
+            """Single-feature Boulevard update following Algorithm 1."""
+            # Cached bin ids and current score profile
+            bins_j = self.train_bins_by_feat_[j]
+            prev_scores = self.term_scores_[j]
+            # Remove feature j contribution to compute residuals with Σ_{ℓ≠j} f_ℓ
+            contrib_prev = 0 #prev_scores[bins_j] for leave-one-out procedure
+            residual_full = y - (preds_round - contrib_prev)
 
-        # Cache lightweight bin metadata for inference helpers
-        main_bin_info = []
-        for feature_idx, bin_levels in enumerate(self.bins_):
-            feature_bins = bin_levels[0]
-            if isinstance(feature_bins, dict):
-                mapping = dict(feature_bins)
-                mapping_str = {str(key): val for key, val in mapping.items()}
-                missing_bin = 1 if len(mapping) == 0 else max(mapping.values()) + 1
-                main_bin_info.append(
-                    {
-                        "kind": "categorical",
-                        "mapping": mapping,
-                        "mapping_str": mapping_str,
-                        "missing": missing_bin,
-                    }
-                )
+            # Optional sample subsampling with feature-specific RNG for reproducibility
+            if self.subsample_rate < 1.0:
+                rng_local = np.random.default_rng(seed)
+                mask = rng_local.random(n) < self.subsample_rate
+                if mask.any():
+                    residual_used = residual_full[mask]
+                    bins_used = bins_j[mask]
+                else:
+                    # In the very rare event all draws are rejected, fall back to full data
+                    residual_used = residual_full
+                    bins_used = bins_j
             else:
-                edges = np.asarray(feature_bins, dtype=float)
-                missing_bin = len(edges) + 1
-                main_bin_info.append(
-                    {
-                        "kind": "continuous",
-                        "edges": edges,
-                        "missing": missing_bin,
-                    }
+                residual_used = residual_full
+                bins_used = bins_j
+
+            # Fit the per-feature "tree" by averaging residuals inside each bin
+            # Start from previous iteration scores so unsampled bins retain their values
+            nbins = prev_scores.shape[0]
+            tree_preds = prev_scores.copy()
+            if bins_used.size > 0:
+                counts = np.bincount(bins_used, minlength=nbins).astype(float)
+                sums = np.bincount(bins_used, weights=residual_used, minlength=nbins).astype(float)
+                mask = counts > 0
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    tree_preds[mask] = sums[mask] / counts[mask]
+
+            # Mean-centre, truncate, and blend with previous round (Algorithm 1, lines 8–12)
+            mu = float(np.dot(bin_weights[j] / n_float, tree_preds))
+            centered = np.clip(tree_preds - mu, -truncation, truncation)
+            coeff = (round_idx - 1.0) / round_idx
+            f_new = coeff * prev_scores + (1.0 / round_idx) * centered
+            return j, f_new, mu
+        
+        for b in range(1, int(self.max_rounds) + 1):
+            preds_round = preds.copy()
+            seeds = self.rng_.integers(0, np.iinfo(np.int32).max, size=p, dtype=np.int64)
+
+            if effective_jobs == 1:
+                # Sequential fallback keeps behaviour deterministic in the single-thread case
+                results = [_feature_update(j, int(seeds[j]), preds_round, b) for j in range(p)]
+            else:
+                parallel = Parallel(n_jobs=effective_jobs, backend="threading")
+                results = parallel(
+                    delayed(_feature_update)(j, int(seeds[j]), preds_round, b) for j in range(p)
                 )
 
-        self._main_bin_info_ = main_bin_info
+            for j, updated_scores, _ in results:
+                self.term_scores_[j] = updated_scores
 
-        feature_term_map: Dict[int, int] = {}
-        term_features = getattr(self, "term_features_", None)
-        if term_features is not None:
-            for term_idx, term in enumerate(term_features):
-                if len(term) == 1:
-                    feature_term_map[term[0]] = term_idx
-        self._feature_term_map_ = feature_term_map
+            # Refresh the intercept so that predictions remain unbiased after applying
+            # the new feature contributions.  This mirrors the effect of Algorithm 1's
+            # intercept update without relying on the individual μ values, which can
+            # become numerically unstable when features are updated in parallel.
+            contributions = np.zeros(n, dtype=float)
+            for j in range(p):
+                contributions += self.term_scores_[j][self.train_bins_by_feat_[j]]
+            self.intercept_ = float(np.mean(y - contributions))
+            preds = self.intercept_ + contributions
+        
+        # 4) Post-fit exact recenter per feature (∑ᵢfₖ(xᵢ)=0)
+        self.intercept_ = _post_fit_recenter(
+            self.intercept_, self.term_scores_, bin_weights, self.train_bins_by_feat_
+        )
+        # 4a) Boulevard correction -- multiply term scores by 2
+        for j in range(p):
+            self.term_scores_[j] = 2*self.term_scores_[j] 
+        
+        # 5) Enforce centering + intercept consistency (additional safety)
+        self._center_terms_and_fix_intercept()
+        
+        # 6) Set fitted flag before building kernels and computing sigma
+        self.has_fitted_ = True
+        
+        # 7) Build structure matrices for statistical inference
+        self._build_structure_matrices()
+        
+        # 8) Default sigma estimation
+        resid = self.train_y_ - self.predict(self.train_X_)
+        self.sigma_ = float(np.std(resid[np.isfinite(resid)], ddof=1))
+        if not np.isfinite(self.sigma_) or self.sigma_ <= 0:
+            self.sigma_ = 1e-8
+        
+        return self
 
     def _center_terms_and_fix_intercept(self):
         """Centre every main-effect term and adjust the intercept accordingly.
@@ -4875,21 +4723,75 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         # Center each term on the train distribution and push the removed mean into intercept
         for j in range(p):
             bins = self.train_bins_by_feat_[j]
-            term_idx = self._feature_term_map_.get(j)
-            if term_idx is None:
-                continue
-            scores = term_arr[term_idx]
+            scores = term_arr[j]
             counts = np.bincount(bins, minlength=scores.shape[0]).astype(float)
             if counts.sum() == 0:
                 continue
             w = counts / counts.sum()
             m = float(np.dot(w, scores))
             if np.isfinite(m) and abs(m) > 1e-15:
-                term_arr[term_idx] = scores - m
+                term_arr[j] = scores - m
                 self.intercept_ += m
 
         # Force intercept to mean(y_train) now that terms are zero-mean
         self.intercept_ = float(np.mean(y))
+
+    def _merge_small_bins_and_map(self, bins_old: np.ndarray, min_count: int) -> tuple:
+        """Coalesce under-populated bins and provide mapping utilities.
+
+        Parameters
+        ----------
+        bins_old : ndarray of shape (n_samples,)
+            Original bin identifiers produced by the adaptive discretisation.
+        min_count : int
+            Minimum number of samples required for a bin to remain distinct.
+
+        Returns
+        -------
+        bins_new : ndarray of shape (n_samples,), dtype int64
+            Updated bin identifiers taking values in ``[0, m_new)``.
+        old_to_new : ndarray of shape (max(bins_old) + 1,), dtype int64
+            Lookup table mapping every original bin id to the corresponding
+            merged id.
+        m_new : int
+            Number of surviving bins after merging.
+        """
+        bins = bins_old.copy()
+        # two passes merge
+        def _pass(bins_arr):
+            if bins_arr.size == 0:
+                return bins_arr
+            counts = np.bincount(bins_arr, minlength=int(bins_arr.max()) + 1).astype(int)
+            for b in range(counts.size):
+                if counts[b] > 0 and counts[b] < min_count:
+                    if b < counts.size - 1:
+                        bins_arr[bins_arr == b] = b + 1
+                    elif b > 0:
+                        bins_arr[bins_arr == b] = b - 1
+            return bins_arr
+        bins = _pass(bins)
+        bins = _pass(bins)
+        if bins.size > 0:
+            bins = np.clip(bins, 0, int(bins.max()))
+        # compress to contiguous ids
+        unique_new = np.unique(bins)
+        compress = {int(u): i for i, u in enumerate(unique_new)}
+        bins_new = np.vectorize(lambda x: compress[int(x)])(bins).astype(np.int64)
+        m = int(len(unique_new))
+        # old->new map using mode of transitions
+        old_max = int(bins_old.max()) if bins_old.size > 0 else -1
+        old_to_new = np.zeros(old_max + 1, dtype=np.int64)
+        for b_old in range(old_max + 1):
+            idx = np.where(bins_old == b_old)[0]
+            if idx.size == 0:
+                # map unused old id to nearest new id by numeric proximity
+                nearest = min(unique_new, key=lambda u: abs(int(u) - b_old)) if unique_new.size > 0 else 0
+                old_to_new[b_old] = compress[int(nearest)]
+            else:
+                vals, counts = np.unique(bins_new[idx], return_counts=True)
+                old_to_new[b_old] = int(vals[np.argmax(counts)])
+        
+        return bins_new, old_to_new, m
 
     def _build_structure_matrices(self):
         """Construct the linear algebra objects required for inference.
@@ -4922,7 +4824,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         if not hasattr(self, 'train_X_') or self.train_X_ is None:
             self.centered_ = False
             return
-
+        
         if self.bin_level_inference:
             self._build_bin_level_structures()
             self.centered_ = True
@@ -5164,37 +5066,29 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         end = int(self.bin_offsets_[feature_idx + 1])
         return slice(start, end)
 
-    def _resolve_new_bin(self, feature_idx: int, value) -> int:
-        """Map a raw feature value to the trained bin identifier."""
+    def _resolve_new_bin(self, feature_idx: int, value: float) -> int:
+        """Map a raw feature value to the merged bin identifier used on train.
 
-        if not hasattr(self, "_main_bin_info_") or not self._main_bin_info_:
-            self._initialize_training_bins()
-        if not self._main_bin_info_ or feature_idx >= len(self._main_bin_info_):
-            raise RuntimeError("Bin metadata not initialised. Call fit() first.")
+        Parameters
+        ----------
+        feature_idx : int
+            Feature index whose discretisation should be applied.
+        value : float
+            Raw feature value (already cast to float for continuous features).
 
-        info = self._main_bin_info_[feature_idx]
-        if info["kind"] == "categorical":
-            mapping = info["mapping"]
-            bin_idx = mapping.get(value)
-            if bin_idx is None:
-                bin_idx = info["mapping_str"].get(str(value), info["missing"])
-            return int(bin_idx)
-
-        # Continuous feature
-        if value is None:
-            return int(info["missing"])
-        try:
-            val = float(value)
-        except (TypeError, ValueError):
-            return int(info["missing"])
-
-        if np.isnan(val):
-            return int(info["missing"])
-
-        native = Native.get_native_singleton()
-        arr = np.array([val], dtype=np.float64)
-        bin_idx = int(native.discretize(arr, info["edges"])[0])
-        return bin_idx
+        Returns
+        -------
+        int
+            New bin identifier in ``[0, n_bins_feature)`` after small-bin
+            merging.
+        """
+        mapping = self.old_to_new_map_[feature_idx]
+        old_bins = _assign_bins(
+            np.array([[value]]),
+            [self.binning_list_[feature_idx]],
+        )[0]
+        old = int(np.clip(old_bins[0], 0, mapping.shape[0] - 1))
+        return int(np.clip(mapping[old], 0, mapping.max(initial=0)))
 
     def _bin_norm(self, row: np.ndarray) -> float:
         """Compute the Euclidean norm of a bin-space vector.
@@ -5440,8 +5334,13 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         """
         bins_train = self.train_bins_by_feat_[feature_idx]
         
-        new_bin = int(self._resolve_new_bin(feature_idx, x_k))
-        same = bins_train == new_bin
+        # Get old bin id for this feature
+        old_bins = _assign_bins(np.array([[x_k]]), [self.binning_list_[feature_idx]])[0]
+        old = old_bins[0]
+        
+        # Map to new bin id
+        new = int(self.old_to_new_map_[feature_idx][old])
+        same = (bins_train == new)
         m = int(np.count_nonzero(same))
         
         if m == 0:
@@ -5449,12 +5348,12 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             unique = np.unique(bins_train)
             if unique.size == 0:
                 return np.zeros_like(bins_train, dtype=float)
-            nearest = int(unique[np.argmin(np.abs(unique - new_bin))])
-            same = bins_train == nearest
+            new = int(unique[np.argmin(np.abs(unique - new))])
+            same = (bins_train == new)
             m = int(np.count_nonzero(same))
             if m == 0:
                 return np.zeros_like(bins_train, dtype=float)
-
+        
         v = np.zeros_like(bins_train, dtype=float)
         if m > 0:
             v[same] = 1.0 / m
@@ -5750,16 +5649,10 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         if space == "bins" and self.bin_offsets_ is None:
             self._build_bin_level_structures()
 
-        term_idx = self._feature_term_map_.get(feature_idx)
-        if term_idx is None:
-            raise ValueError(f"Feature index {feature_idx} does not have an associated main-effect term.")
-
-        bins_new = np.array(
-            [self._resolve_new_bin(feature_idx, val) for val in x_k],
-            dtype=np.int64,
-        )
-        bins_new = np.clip(bins_new, 0, self.term_scores_[term_idx].shape[0] - 1)
-        contrib = self.term_scores_[term_idx][bins_new]
+        bins_old = _assign_bins(x_k.reshape(-1, 1), [self.binning_list_[feature_idx]])[0]
+        bins_old = np.clip(bins_old, 0, self.old_to_new_map_[feature_idx].shape[0] - 1)
+        bins_new = self.old_to_new_map_[feature_idx][bins_old]
+        contrib = self.term_scores_[feature_idx][bins_new]
         preds = contrib + (self.intercept_ if include_intercept else 0.0)
 
         half_widths = np.empty_like(preds, dtype=float)
@@ -5844,14 +5737,17 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         for i in range(m):
             r = np.zeros(n, dtype=float)
             for j in groups:
-                new_bin = int(self._resolve_new_bin(j, X[i, j]))
+                old_bins = _assign_bins(np.array([[X[i, j]]]), [self.binning_list_[j]])[0]
+                old = old_bins[0]
+                new = int(self.old_to_new_map_[j][old])
+                
                 b_train = self.train_bins_by_feat_[j]
-                same = b_train == new_bin
+                same = (b_train == new)
                 mj = int(np.count_nonzero(same))
                 
                 if mj == 0:
                     continue
-
+                
                 v = np.zeros(n, dtype=float)
                 v[same] = 1.0 / mj
                 r += v @ self.pinv_Ik_[j] @ self.J_ @ self.inv_IplusK_

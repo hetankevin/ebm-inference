@@ -200,6 +200,7 @@ def run_rep(rep, args, base_seed=0):
         use_nystrom=args.use_nystrom,
         nystrom_rank=args.nystrom_rank,
         nystrom_ridge=args.nystrom_ridge,
+        auto_bins_scheme=args.auto_bins_scheme,
     )
 
     ebm = InferableEBMRegressor(**estimator_kwargs)
@@ -315,6 +316,20 @@ def run_rep(rep, args, base_seed=0):
     sigma = float(np.clip(sigma, 1e-8, 1e6))
 
     inference_space = None if args.inference_space == "auto" else args.inference_space
+
+    if args.calibrate_intervals:
+        try:
+            ebm.calibrate_intervals(
+                Xcal,
+                ycal,
+                level=args.level,
+                mode="prediction",
+                sigma=sigma,
+                inference_space=inference_space,
+                propagate_to_ci_ri=args.propagate_calibration,
+            )
+        except ValueError as exc:
+            print(f"[rep {rep}] Interval calibration failed: {exc}")
     ci_l, ci_u, yhat = ebm.predict_intervals(
         Xte,
         level=args.level,
@@ -340,8 +355,17 @@ def run_rep(rep, args, base_seed=0):
     # Paper-faithful coverage definitions
     cov_ci = float(np.mean((f_te >= ci_l) & (f_te <= ci_u)))
     cov_pi = float(np.mean((yte  >= pi_l) & (yte  <= pi_u)))
-    yhat_te = ebm.predict(Xte)
-    cov_ri = float(np.mean((yhat_te >= ri_l) & (yhat_te <= ri_u)))
+
+    rng_repro = np.random.default_rng(base_seed + 19001 * (rep + 1))
+    X_new, f_true_new = make_friedman(args.n, rng_repro)
+    y_new = f_true_new + rng_repro.normal(0, args.noise, size=args.n)
+    (Xtr_new, ytr_new, _), _, _ = split3(X_new, y_new, rng_repro, cal_frac=args.cal_frac, test_frac=args.test_frac)
+    retrain_kwargs = estimator_kwargs.copy()
+    retrain_kwargs["random_state"] = base_seed + 3001 * (rep + 1)
+    ebm_retrain = InferableEBMRegressor(**retrain_kwargs)
+    ebm_retrain.fit(Xtr_new, ytr_new)
+    yhat_retrain = ebm_retrain.predict(Xte)
+    cov_ri = float(np.mean((yhat_retrain >= ri_l) & (yhat_retrain <= ri_u)))
 
     w_ci = float(np.mean(ci_u - ci_l))
     w_pi = float(np.mean(pi_u - pi_l))
@@ -369,14 +393,14 @@ def run_rep(rep, args, base_seed=0):
                 "ri_u": ri_u,
                 "cov_ci": (f_te >= ci_l) & (f_te <= ci_u),
                 "cov_pi": (yte >= pi_l) & (yte <= pi_u),
-                "cov_ri": (yhat_te >= ri_l) & (yhat_te <= ri_u),
+                "cov_ri": (yhat_retrain >= ri_l) & (yhat_retrain <= ri_u),
                 "w_ci": ci_u - ci_l,
                 "w_pi": pi_u - pi_l,
                 "w_ri": ri_u - ri_l,
                 "f": f_te,
                 "y": yte,
                 "yhat": yhat,
-                "yhat_te": yhat_te,
+                "yhat_retrain": yhat_retrain,
             }
         ),
     )
@@ -388,7 +412,7 @@ def main():
     ap.add_argument("--noise", type=float, default=1)
     ap.add_argument("--cal-frac", dest="cal_frac", type=float, default=0.1)
     ap.add_argument("--test-frac", dest="test_frac", type=float, default=0.2)
-    ap.add_argument("--rounds", type=int, default=50)
+    ap.add_argument("--rounds", type=int, default=100)
     ap.add_argument("--max-leaves", type=int, default=2)
     ap.add_argument("--n-bins", dest="n_bins", type=int, default=0)
     inf_group = ap.add_mutually_exclusive_group()
@@ -413,14 +437,31 @@ def main():
     )
     ap.add_argument("--n-jobs", type=int, default=-2)
     ap.add_argument("--outer-bags", type=int, default=14)
-    ap.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=0.8)
+    ap.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1)
     ap.add_argument("--truncation", type=float, default=100.0)
     ap.add_argument("--reps", type=int, default=50)
     ap.add_argument("--level", type=float, default=0.95)
     ap.add_argument("--use-nystrom", dest="use_nystrom", action="store_true")
     ap.add_argument("--no-nystrom", dest="use_nystrom", action="store_false")
+    ap.set_defaults(use_nystrom=False)
     ap.add_argument("--nystrom-rank", dest="nystrom_rank", type=int, default=64)
     ap.add_argument("--nystrom-ridge", dest="nystrom_ridge", type=float, default=1e-6)
+    ap.add_argument(
+        "--auto-bins-scheme",
+        choices=["quantile", "cube", "count"],
+        default="quantile",
+        help="Automatic numeric binning policy (default: quantile).",
+    )
+    ap.add_argument(
+        "--calibrate-intervals",
+        action="store_true",
+        help="Calibrate prediction intervals on the validation split",
+    )
+    ap.add_argument(
+        "--propagate-calibration",
+        action="store_true",
+        help="Apply the prediction-interval calibration factor to confidence and reproduction intervals",
+    )
     ap.add_argument("--out", type=str, default="coverage.csv")
     ap.add_argument("--out-summary", dest='out_summary', type=str, default="coverage_summary.csv")
     ap.add_argument(

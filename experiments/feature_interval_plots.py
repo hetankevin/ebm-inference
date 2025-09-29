@@ -45,8 +45,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-points", type=int, default=200, help="Grid size per feature")
     parser.add_argument("--inference-space", choices=["auto", "samples", "bins"], default="auto")
     parser.add_argument("--max-rounds", type=int, default=100)
-    parser.add_argument("--n-bins", type=int, default=32)
-    parser.add_argument("--bin-level-inference", default=True, help="Use bin-level inference when fitting")
+    parser.add_argument("--n-bins", type=int, default=0)
+    parser.add_argument("--max-leaves", type=int, default=2)
+    inf_group = parser.add_mutually_exclusive_group()
+    inf_group.add_argument(
+        "--bin-level-inference",
+        dest="bin_level_inference",
+        action="store_true",
+        help="Build inference objects in bin space.",
+    )
+    inf_group.add_argument(
+        "--sample-level-inference",
+        dest="bin_level_inference",
+        action="store_false",
+        help="Force inference objects to operate in sample space.",
+    )
+    parser.set_defaults(bin_level_inference=True)
+    nys_group = parser.add_mutually_exclusive_group()
+    nys_group.add_argument("--use-nystrom", dest="use_nystrom", action="store_true", help="Enable Nyström approximation")
+    nys_group.add_argument("--no-nystrom", dest="use_nystrom", action="store_false", help="Disable Nyström approximation")
+    parser.set_defaults(use_nystrom=False)
+    parser.add_argument("--nystrom-rank", type=int, default=64)
+    parser.add_argument("--nystrom-ridge", type=float, default=1e-6)
+    parser.add_argument("--calibrate-intervals", action="store_true", help="Calibrate prediction intervals on a validation split")
+    parser.add_argument(
+        "--propagate-calibration",
+        action="store_true",
+        help="Apply the prediction-interval calibration factor to confidence and reproduction intervals",
+    )
+    parser.add_argument(
+        "--auto-bins-scheme",
+        choices=["quantile", "cube", "count"],
+        default="quantile",
+        help="Automatic numeric binning policy (default: quantile)",
+    )
     parser.add_argument("--output", type=str, default="plots/feature_interval_plots.png", help="Output figure path")
     parser.add_argument("--show", action="store_true", help="Display the plot interactively")
     return parser.parse_args()
@@ -59,16 +91,56 @@ def main() -> None:
     X, f_true = make_friedman(args.n, rng)
     y = f_true + rng.normal(scale=args.noise, size=args.n)
 
+    if args.calibrate_intervals and args.n > 1:
+        perm = rng.permutation(args.n)
+        n_cal = max(1, int(0.2 * args.n))
+        cal_idx = perm[:n_cal]
+        train_idx = perm[n_cal:]
+        X_cal = X[cal_idx]
+        y_cal = y[cal_idx]
+        X_train = X[train_idx]
+        y_train = y[train_idx]
+    else:
+        X_train, y_train = X, y
+        X_cal = None
+        y_cal = None
+
     model = InferableEBMRegressor(
         max_rounds=args.max_rounds,
         max_bins=args.n_bins,
         subsample_rate=1.0,
         truncation=3.0,
         random_state=0,
+        max_leaves=args.max_leaves,
         bin_level_inference=args.bin_level_inference,
+        use_nystrom=args.use_nystrom,
+        nystrom_rank=args.nystrom_rank,
+        nystrom_ridge=args.nystrom_ridge,
+        auto_bins_scheme=args.auto_bins_scheme,
     )
-    model.fit(X, y)
+    model.fit(X_train, y_train)
     print('Model fitted')
+
+    inference_space = None if args.inference_space == "auto" else args.inference_space
+
+    sigma_override = None
+    if args.calibrate_intervals and X_cal is not None:
+        resid_cal = y_cal - model.predict(X_cal)
+        resid_cal = resid_cal[np.isfinite(resid_cal)]
+        if resid_cal.size:
+            sigma_override = float(np.std(resid_cal, ddof=1))
+        if sigma_override is not None and np.isfinite(sigma_override) and sigma_override > 0:
+            model.calibrate_intervals(
+                X_cal,
+                y_cal,
+                level=args.level,
+                mode="prediction",
+                sigma=sigma_override,
+                inference_space=inference_space,
+                propagate_to_ci_ri=args.propagate_calibration,
+            )
+        else:
+            sigma_override = None
 
     baseline = np.mean(X, axis=0)
     n_features = X.shape[1]
@@ -95,7 +167,8 @@ def main() -> None:
             grid,
             level=args.level,
             mode=args.mode,
-            inference_space=args.inference_space,
+            sigma=sigma_override,
+            inference_space=inference_space,
             include_intercept=True,
         )
         oracle = friedman_true_function(X_grid)
