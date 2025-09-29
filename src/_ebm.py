@@ -4016,7 +4016,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         the subset G_{b,k}. This subsampling is crucial for the statistical inference properties.
         Higher values mean more samples are included for each feature, while lower values increase
         the subsampling effect. Typical values range from 0.5 to 0.8.
-    truncation : float, default=2.0
+    truncation : float, default=100.0
         Truncation parameter M for limiting tree predictions to [-M, M] range.
         This parameter controls the maximum absolute value of tree predictions after
         mean-centering. The truncation is applied as: max{-M, min{tilde_t^(b,k)(x), M}}.
@@ -4179,10 +4179,11 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         outer_bags: int = 8,
         inner_bags: Optional[int] = 0,
         # Boosting
-        learning_rate: float = 1,
+        learning_rate: float = 0.1,
         max_rounds: Optional[int] = 200,
         early_stopping_rounds: Optional[int] = 50,
         early_stopping_tolerance: Optional[float] = 1e-5,
+        warmup_rounds: int = 20,
         # Trees
         min_samples_leaf: Optional[int] = 5,
         reg_alpha: Optional[float] = 0.01,
@@ -4236,9 +4237,8 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         inner_bags : int or None, default=0
             Number of inner bagging loops per boosting step (``0`` disables
             inner bagging).
-        learning_rate : float, default=0.02
-            Compatibility argument; the inferable variant internally uses a
-            boulevard learning rate of 1.0.
+        learning_rate : float, default=0.1
+            Learning rate for both warm-starting rounds and Boulevard rounds.
         max_rounds : int or None, default=200
             Maximum number of boosting rounds (each round sequentially visits
             every feature once).
@@ -4263,9 +4263,14 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         subsample_rate : float, default=1.0
             Subsampling probability ξ used when selecting samples per feature
             and round.
-        truncation : float, default=3.0
+        truncation : float, default=100.0
             Absolute value clipping applied to every feature update to keep
             boulevard averages bounded.
+        warmup_rounds : int, default=20
+            Number of initial rounds that use additive updates (no 1/t
+            averaging). Subsequent rounds follow the Boulevard 1/t averaging
+            scheme. This can reduce early underfitting on some datasets while
+            preserving Boulevard-style stability.
         honest : bool, default=False
             Placeholder for honest tree splits. Behaviour matches the base class
             when ``False``.
@@ -4348,6 +4353,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         self.boulevard_scale = (1+self.learning_rate)/self.learning_rate
         self.subsample_rate = subsample_rate
         self.truncation = truncation
+        self.warmup_rounds = int(max(0, warmup_rounds))
         self.honest = honest
         self.min_bin_count = min_bin_count
         self.use_nystrom = use_nystrom
@@ -4361,6 +4367,8 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             raise ValueError("auto_bins_scheme must be 'quantile', 'cube', or 'count'")
         self._auto_bins_scheme = normalized_scheme
         self.bin_level_inference = bin_level_inference
+        # Warmup rounds: additive updates before Boulevard averaging
+        self.warmup_rounds = int(max(0, warmup_rounds))
         
         # Initialize statistical inference attributes
         self.Kk_ = []
@@ -4423,15 +4431,19 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
 
 
         sample_count = self.train_X_.shape[0]
-        min_bins_auto = getattr(self, "min_bins_auto", 8)
-        max_bins_auto = getattr(self, "max_bins_auto", 512)
-        auto_scheme = getattr(self, "_auto_bins_scheme", "quantile")
-        adaptive_bins = _auto_bins_for_numeric(
-            sample_count,
-            min_bins_auto=min_bins_auto,
-            max_bins_auto=max_bins_auto,
-            scheme=auto_scheme,
-        )
+        max_bins = getattr(self, "max_bins", 0)
+        if max_bins == 0:
+            min_bins_auto = getattr(self, "min_bins_auto", 8)
+            max_bins_auto = getattr(self, "max_bins_auto", 512)
+            auto_scheme = getattr(self, "_auto_bins_scheme", "quantile")
+            adaptive_bins = _auto_bins_for_numeric(
+                sample_count,
+                min_bins_auto=min_bins_auto,
+                max_bins_auto=max_bins_auto,
+                scheme=auto_scheme,
+            )
+        else:
+            adaptive_bins = max_bins
         # Native binning (main effects only)
         binning_result = construct_bins(
             X=X,
@@ -4539,7 +4551,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         preds = np.full(n_samples, self.intercept_, dtype=float)
 
         truncation = float(self.truncation)
-        learning_rate = float(self.learning_rate or 1.0)
+        learning_rate = float(self.learning_rate or 0.1)
         n_float = float(n_samples)
         max_rounds = int(self.max_rounds)
         max_leaves = self.max_leaves if self.max_leaves is not None else 3
@@ -4551,10 +4563,13 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         min_cat_samples = int(self.min_cat_samples or 0)
         cat_smooth = float(self.cat_smooth or 0.0)
 
+        # Separate accumulators: warmup part (additive) and averaged part (Boulevard)
+        warm_scores = [np.zeros_like(s, dtype=float) for s in self.term_scores_]
+        avg_scores = [np.zeros_like(s, dtype=float) for s in self.term_scores_]
+
         # Boosting loop -----------------------------------------------------
         for round_idx in range(1, max_rounds + 1):
             preds_previous = preds.copy()
-            residual_full = y - preds_previous
 
             if self.subsample_rate < 1.0:
                 masks = []
@@ -4570,7 +4585,6 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             coeff = (round_idx - 1.0) / round_idx
 
             def _update_feature(feat_idx, mask):
-                prev_scores = self.term_scores_[feat_idx]
                 dataset = native_datasets[feat_idx]
 
                 bag = np.zeros(n_samples, dtype=np.int8)
@@ -4595,7 +4609,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                         None,
                         term_idx=0,
                         term_boost_flags=Native.TermBoostFlags_Default,
-                        learning_rate=learning_rate,
+                        learning_rate=1,
                         min_samples_leaf=min_leaf,
                         min_hessian=min_hessian,
                         reg_alpha=reg_alpha,
@@ -4611,23 +4625,17 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                     update_bins = booster.get_term_update()
 
                 update_bins = np.asarray(update_bins, dtype=float)
-                if update_bins.ndim > 1:
-                    update_bins = np.squeeze(update_bins, axis=-1)
-                prev_len = prev_scores.shape[0]
-                if update_bins.shape[0] != prev_len:
-                    if update_bins.shape[0] > prev_len:
-                        update_bins = update_bins[:prev_len]
-                    else:
-                        update_bins = np.pad(
-                            update_bins,
-                            (0, prev_len - update_bins.shape[0]),
-                            mode="constant",
-                        )
 
                 mu_local = float(np.dot(bin_counts[feat_idx], update_bins) / n_float)
                 centered = np.clip(update_bins - mu_local, -truncation, truncation)
-                new_scores = coeff * prev_scores + (1.0 / round_idx) * centered
-                return feat_idx, new_scores, mu_local
+                # Warmup: additive updates for the first K rounds, then Boulevard 1/t averaging
+                if round_idx <= self.warmup_rounds:
+                    new_warm = warm_scores[feat_idx] + self.learning_rate * centered
+                    new_avg = avg_scores[feat_idx]
+                else:
+                    new_warm = warm_scores[feat_idx]
+                    new_avg = coeff * avg_scores[feat_idx] + (self.learning_rate / round_idx) * centered
+                return feat_idx, new_warm, new_avg, mu_local
 
             n_jobs_effective = effective_n_jobs(self.n_jobs)
             if n_jobs_effective <= 1:
@@ -4642,11 +4650,10 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                     for feat_idx in range(n_features)
                 )
 
-            #mu_total = 0.0
-            for feat_idx, new_scores, mu_local in results:
-                self.term_scores_[feat_idx] = new_scores
-                #mu_total += mu_local
-            #self.intercept_ += mu_total
+            for feat_idx, new_warm, new_avg, mu_local in results:
+                warm_scores[feat_idx] = new_warm
+                avg_scores[feat_idx] = new_avg
+                self.term_scores_[feat_idx] = new_warm + new_avg
 
             # Refresh the intercept so that predictions remain unbiased after applying
             # the new feature contributions.  This mirrors the effect of Algorithm 1's
@@ -4669,9 +4676,9 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             bin_counts, 
             self.train_bins_by_feat_
         )
-        # 4a) Boulevard correction -- multiply term scores by 2
+        # 4a) Boulevard correction -- only scale the averaged component
         for j in range(n_features):
-            self.term_scores_[j] = self.boulevard_scale * self.term_scores_[j] 
+            self.term_scores_[j] = warm_scores[j] + self.boulevard_scale * avg_scores[j]
 
         # 5) Enforce centering + intercept consistency (additional safety)
         self._center_terms_and_fix_intercept()
