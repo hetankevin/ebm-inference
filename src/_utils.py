@@ -1,12 +1,14 @@
 # Copyright (c) 2023 The InterpretML Contributors
 # Distributed under the MIT software license
 
+import heapq
 import logging
 import warnings
 from collections import defaultdict
-from itertools import islice
+from dataclasses import dataclass
+from itertools import count, islice
 from math import floor, exp, isfinite, isinf, log
-from typing import List
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -196,6 +198,157 @@ def process_bag_terms(intercept, term_scores, bin_weights):
         # effectively meaningless and can be ignored. Set the value to zero for interpretability reasons
 
         restore_missing_value_zeros(scores, weights)
+
+
+@dataclass
+class _BinSegment:
+    start: int
+    end: int
+    count: float
+    total: float
+    total_sq: float
+    sse: float
+    id: int
+    active: bool = True
+    best_split: Optional[int] = None
+    best_gain: float = 0.0
+
+
+def _greedy_bin_segments(
+    counts: np.ndarray,
+    sums: np.ndarray,
+    sumsqs: np.ndarray,
+    max_leaves: int,
+    min_leaf: float,
+) -> List[Tuple[int, int, float, float]]:
+    """Return greedy piecewise-constant segments for ordered bins.
+
+    Parameters
+    ----------
+    counts : ndarray
+        Per-bin sample counts (post-subsampling).
+    sums : ndarray
+        Per-bin sum of target residuals.
+    sumsqs : ndarray
+        Per-bin sum of squared residuals.
+    max_leaves : int
+        Maximum number of segments to grow.
+    min_leaf : float
+        Minimum total count allowed per segment.
+
+    Returns
+    -------
+    list of tuples
+        Each tuple contains (start, end, total, count) for a leaf segment.
+    """
+
+    nbins = counts.shape[0]
+    if nbins == 0:
+        return []
+
+    if max_leaves is None or max_leaves <= 0:
+        max_leaves = nbins if nbins > 0 else 1
+    max_leaves = max(1, int(max_leaves))
+
+    if min_leaf is None or min_leaf <= 0:
+        min_leaf = 1.0
+
+    if not np.any(counts):
+        return []
+
+    prefix_counts = np.zeros(nbins + 1, dtype=float)
+    prefix_counts[1:] = np.cumsum(counts, dtype=float)
+    prefix_sums = np.zeros(nbins + 1, dtype=float)
+    prefix_sums[1:] = np.cumsum(sums, dtype=float)
+    prefix_sumsqs = np.zeros(nbins + 1, dtype=float)
+    prefix_sumsqs[1:] = np.cumsum(sumsqs, dtype=float)
+
+    def _compute_sse(cnt: float, sm: float, ssq: float) -> float:
+        if cnt <= 0.0:
+            return 0.0
+        sse_val = ssq - (sm * sm) / cnt
+        return sse_val if sse_val > 0.0 else 0.0
+
+    segment_ids = count()
+
+    def _build_segment(start: int, end: int) -> _BinSegment:
+        seg_cnt = prefix_counts[end] - prefix_counts[start]
+        seg_sum = prefix_sums[end] - prefix_sums[start]
+        seg_sumsq = prefix_sumsqs[end] - prefix_sumsqs[start]
+        seg_sse = _compute_sse(seg_cnt, seg_sum, seg_sumsq)
+        segment = _BinSegment(start, end, seg_cnt, seg_sum, seg_sumsq, seg_sse, next(segment_ids))
+        _evaluate(segment)
+        return segment
+
+    def _evaluate(segment: _BinSegment) -> None:
+        segment.best_split = None
+        segment.best_gain = 0.0
+        if segment.end - segment.start <= 1 or segment.count < 2 * min_leaf:
+            return
+
+        left_cnt = 0.0
+        left_sum = 0.0
+        left_sumsq = 0.0
+        right_cnt = segment.count
+        right_sum = segment.total
+        right_sumsq = segment.total_sq
+
+        for boundary in range(segment.start, segment.end - 1):
+            bin_count = counts[boundary]
+            bin_sum = sums[boundary]
+            bin_sumsq = sumsqs[boundary]
+            left_cnt += bin_count
+            left_sum += bin_sum
+            left_sumsq += bin_sumsq
+            right_cnt -= bin_count
+            right_sum -= bin_sum
+            right_sumsq -= bin_sumsq
+
+            if left_cnt < min_leaf or right_cnt < min_leaf:
+                continue
+
+            left_sse = _compute_sse(left_cnt, left_sum, left_sumsq)
+            right_sse = _compute_sse(right_cnt, right_sum, right_sumsq)
+            gain = segment.sse - (left_sse + right_sse)
+
+            if gain > segment.best_gain:
+                segment.best_gain = float(gain)
+                segment.best_split = boundary
+
+    segments = [_build_segment(0, nbins)]
+    candidate_heap: List[Tuple[float, int, _BinSegment]] = []
+
+    if segments[0].best_split is not None and segments[0].best_gain > 0.0:
+        heapq.heappush(
+            candidate_heap,
+            (-segments[0].best_gain, segments[0].id, segments[0]),
+        )
+
+    while len(segments) < max_leaves and candidate_heap:
+        _, _, segment = heapq.heappop(candidate_heap)
+        if not segment.active or segment.best_split is None or segment.best_gain <= 0.0:
+            continue
+
+        segment.active = False
+        split_at = segment.best_split + 1
+        left_segment = _build_segment(segment.start, split_at)
+        right_segment = _build_segment(split_at, segment.end)
+
+        idx = next(i for i, seg in enumerate(segments) if seg.id == segment.id)
+        segments[idx : idx + 1] = [left_segment, right_segment]
+
+        for new_segment in (left_segment, right_segment):
+            if new_segment.best_split is not None and new_segment.best_gain > 0.0:
+                heapq.heappush(
+                    candidate_heap,
+                    (-new_segment.best_gain, new_segment.id, new_segment),
+                )
+
+    return [
+        (segment.start, segment.end, segment.total, segment.count)
+        for segment in segments
+        if segment.count > 0.0 and segment.end > segment.start
+    ]
 
 
 def process_terms(bagged_intercept, bagged_scores, bin_weights, bag_weights):
@@ -420,10 +573,22 @@ def _digitize_edges(x: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.clip(b, 0, len(edges))
 
 
-def _auto_bins_for_numeric(n: int, min_bins_auto: int = 8, max_bins_auto: int = 512) -> int:
-    """Auto bin count for numeric features: n_bins ≍ n^(1/3), clipped to [min_bins_auto, max_bins_auto]."""
-    nb = int(round(n ** (1.0/3.0)))
-    nb = max(min_bins_auto, min(max_bins_auto, nb))
+def _auto_bins_for_numeric(
+    n: int,
+    min_bins_auto: int = 8,
+    max_bins_auto: int = 255,
+    scheme: str = "quantile",
+) -> int:
+    """Auto bin count for numeric features."""
+
+    scheme = (scheme or "quantile").lower()
+    if scheme in {"quantile", "cube", "cuberoot", "cubert"}:
+        nb = int(2 * round(n ** (1.0 / 3.0)))
+        nb = max(min_bins_auto, min(max_bins_auto - 3, nb))
+    elif scheme == "count":
+        nb = max(min_bins_auto, min(max_bins_auto - 3, n))
+    else:
+        raise ValueError(f"Unknown auto binning scheme '{scheme}'")
     return nb
 
 
@@ -448,14 +613,15 @@ def _merge_small_bins(bins_j: np.ndarray, min_count: int) -> np.ndarray:
     return bins_j
 
 
-def _fit_adaptive_binning(X: np.ndarray, n_bins: int, min_bins_auto: int = 8, 
-                         max_bins_auto: int = 512, rng: np.random.Generator = None) -> List:
-    """
-    Fit adaptive binning for features using Algorithm 1 approach.
-    
-    For numeric features: uses n_bins if > 0, otherwise auto schedule n^(1/3)
-    For categorical features: maps in frequency order, folds tail into last bin
-    """
+def _fit_adaptive_binning(
+    X: np.ndarray,
+    n_bins: int,
+    min_bins_auto: int = 16,
+    max_bins_auto: int = 512,
+    rng: np.random.Generator = None,
+    auto_bins_scheme: str = "quantile",
+) -> List:
+    """Fit adaptive binning for features using Algorithm 1 approach."""
     if rng is None:
         rng = np.random.default_rng()
         
@@ -484,7 +650,12 @@ def _fit_adaptive_binning(X: np.ndarray, n_bins: int, min_bins_auto: int = 8,
                 'n_bins': nb
             })
         else:  # numeric
-            nb = n_bins if n_bins > 0 else _auto_bins_for_numeric(n, min_bins_auto, max_bins_auto)
+            nb = n_bins if n_bins > 0 else _auto_bins_for_numeric(
+                n,
+                min_bins_auto,
+                max_bins_auto,
+                scheme=auto_bins_scheme,
+            )
             edges = _quantile_edges(col, nb, rng)
             binning_list.append({
                 'is_categorical': False,

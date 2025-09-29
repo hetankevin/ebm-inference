@@ -67,28 +67,66 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         parser.add_argument("--max-bins", type=int, default=64)
         parser.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1.0)
         parser.add_argument("--truncation", type=float, default=3.0)
-        parser.add_argument("--bin-level-inference", action="store_true")
-        parser.add_argument(
+        inf_group = parser.add_mutually_exclusive_group()
+        inf_group.add_argument(
+            "--bin-level-inference",
+            dest="bin_level_inference",
+            action="store_true",
+            help="Build inference objects in bin space.",
+        )
+        inf_group.add_argument(
             "--sample-level-inference",
             dest="bin_level_inference",
-            action="store_false"
+            action="store_false",
+            help="Force inference objects to operate in sample space.",
         )
+        parser.set_defaults(bin_level_inference=True)
         parser.add_argument(
             "--inference-space",
             choices=["auto", "samples", "bins"],
             default="auto",
         )
-        parser.add_argument("--nystrom", dest='nystrom', action="store_true", help="Enable Nyström approximation")
-        parser.add_argument("--no-nystrom", dest='nystrom', action="store_false", help="Disable Nyström approximation")
+        nys_group = parser.add_mutually_exclusive_group()
+        nys_group.add_argument("--use-nystrom", dest='use_nystrom', action="store_true", help="Enable Nyström approximation")
+        nys_group.add_argument("--no-nystrom", dest='use_nystrom', action="store_false", help="Disable Nyström approximation")
+        parser.set_defaults(use_nystrom=False)
         parser.add_argument("--nystrom-rank", type=int, default=64)
         parser.add_argument("--nystrom-ridge", type=float, default=1e-6)
         parser.add_argument("--seed", type=int, default=0)
+        parser.add_argument("--calibrate-intervals", action="store_true", help="Calibrate prediction intervals on a validation split")
+        parser.add_argument(
+            "--propagate-calibration",
+            action="store_true",
+            help="Apply the prediction-interval calibration factor to confidence and reproduction intervals",
+        )
+        parser.add_argument(
+            "--auto-bins-scheme",
+            choices=["quantile", "cube", "count"],
+            default="quantile",
+            help="Automatic numeric binning policy (default: quantile)",
+        )
         parser.add_argument("--out", type=str, default="plots/coverage_1d_plot.png")
         parser.add_argument("--show", action="store_true")
         args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
-    x_train, y_train = simulate_data(args.n_train, args.noise, rng)
+    x_full, y_full = simulate_data(args.n_train, args.noise, rng)
+
+    if args.calibrate_intervals and args.n_train > 1:
+        perm = rng.permutation(args.n_train)
+        n_cal = max(1, int(0.2 * args.n_train))
+        cal_idx = perm[:n_cal]
+        train_idx = perm[n_cal:]
+        x_train = x_full[train_idx]
+        y_train = y_full[train_idx]
+        x_cal = x_full[cal_idx]
+        y_cal = y_full[cal_idx]
+    else:
+        x_train = x_full
+        y_train = y_full
+        x_cal = None
+        y_cal = None
+
     x_eval, y_eval = simulate_data(args.n_eval, args.noise, rng)
 
     estimator = InferableEBMRegressor(
@@ -98,30 +136,104 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         truncation=args.truncation,
         random_state=args.seed,
         bin_level_inference=args.bin_level_inference,
-        use_nystrom=args.nystrom,
+        use_nystrom=args.use_nystrom,
         nystrom_rank=args.nystrom_rank,
         nystrom_ridge=args.nystrom_ridge,
+        auto_bins_scheme=args.auto_bins_scheme,
     )
     estimator.fit(x_train, y_train)
+
+    inference_space = None if args.inference_space == "auto" else args.inference_space
+
+    sigma_override = None
+    if args.calibrate_intervals and x_cal is not None:
+        resid_cal = y_cal - estimator.predict(x_cal)
+        resid_cal = resid_cal[np.isfinite(resid_cal)]
+        if resid_cal.size:
+            sigma_override = float(np.std(resid_cal, ddof=1))
+        if sigma_override is None or not np.isfinite(sigma_override) or sigma_override <= 0:
+            sigma_override = None
+        else:
+            estimator.calibrate_intervals(
+                x_cal,
+                y_cal,
+                level=args.level,
+                mode="prediction",
+                sigma=sigma_override,
+                inference_space=inference_space,
+                propagate_to_ci_ri=args.propagate_calibration,
+            )
 
     grid = np.linspace(0.0, 1.0, 500)
     X_grid = grid[:, None]
     preds_grid = estimator.predict(X_grid)
 
-    inference_space = None if args.inference_space == "auto" else args.inference_space
-    ci_l, ci_u, _ = estimator.predict_intervals(X_grid, level=args.level, mode="confidence", inference_space=inference_space)
-    ri_l, ri_u, _ = estimator.predict_intervals(X_grid, level=args.level, mode="reproduction", inference_space=inference_space)
-    pi_l, pi_u, _ = estimator.predict_intervals(X_grid, level=args.level, mode="prediction", inference_space=inference_space)
+    ci_l, ci_u, _ = estimator.predict_intervals(
+        X_grid,
+        level=args.level,
+        mode="confidence",
+        sigma=sigma_override,
+        inference_space=inference_space,
+    )
+    ri_l, ri_u, _ = estimator.predict_intervals(
+        X_grid,
+        level=args.level,
+        mode="reproduction",
+        sigma=sigma_override,
+        inference_space=inference_space,
+    )
+    pi_l, pi_u, _ = estimator.predict_intervals(
+        X_grid,
+        level=args.level,
+        mode="prediction",
+        sigma=sigma_override,
+        inference_space=inference_space,
+    )
 
     # Coverage on evaluation samples
     X_eval = x_eval
-    ci_l_eval, ci_u_eval, _ = estimator.predict_intervals(X_eval, level=args.level, mode="confidence", inference_space=inference_space)
-    ri_l_eval, ri_u_eval, preds_eval = estimator.predict_intervals(X_eval, level=args.level, mode="reproduction", inference_space=inference_space)
-    pi_l_eval, pi_u_eval, _ = estimator.predict_intervals(X_eval, level=args.level, mode="prediction", inference_space=inference_space)
+    ci_l_eval, ci_u_eval, _ = estimator.predict_intervals(
+        X_eval,
+        level=args.level,
+        mode="confidence",
+        sigma=sigma_override,
+        inference_space=inference_space,
+    )
+    ri_l_eval, ri_u_eval, _ = estimator.predict_intervals(
+        X_eval,
+        level=args.level,
+        mode="reproduction",
+        sigma=sigma_override,
+        inference_space=inference_space,
+    )
+    pi_l_eval, pi_u_eval, _ = estimator.predict_intervals(
+        X_eval,
+        level=args.level,
+        mode="prediction",
+        sigma=sigma_override,
+        inference_space=inference_space,
+    )
 
     coverage_ci = float(np.mean((true_function(x_eval.ravel()) >= ci_l_eval) & (true_function(x_eval.ravel()) <= ci_u_eval)))
-    coverage_ri = float(np.mean((preds_eval >= ri_l_eval) & (preds_eval <= ri_u_eval)))
     coverage_pi = float(np.mean((y_eval >= pi_l_eval) & (y_eval <= pi_u_eval)))
+
+    rng_repro = np.random.default_rng(args.seed + 17)
+    x_new, y_new = simulate_data(args.n_train, args.noise, rng_repro)
+    estimator_retrain = InferableEBMRegressor(
+        max_rounds=args.max_rounds,
+        max_bins=args.max_bins,
+        subsample_rate=args.subsample_rate,
+        truncation=args.truncation,
+        random_state=args.seed + 17,
+        bin_level_inference=args.bin_level_inference,
+        use_nystrom=args.use_nystrom,
+        nystrom_rank=args.nystrom_rank,
+        nystrom_ridge=args.nystrom_ridge,
+        auto_bins_scheme=args.auto_bins_scheme,
+    )
+    estimator_retrain.fit(x_new, y_new)
+    preds_retrain_eval = estimator_retrain.predict(X_eval)
+    coverage_ri = float(np.mean((preds_retrain_eval >= ri_l_eval) & (preds_retrain_eval <= ri_u_eval)))
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     plot_panel(axes[0], x_train.ravel(), y_train, grid, preds_grid, ci_l, ci_u, "Confidence Intervals", coverage_ci, COLOR_CI)
