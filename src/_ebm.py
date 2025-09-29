@@ -16,6 +16,7 @@ from multiprocessing.managers import SharedMemoryManager
 from operator import itemgetter
 from typing import Optional, Union, List, Dict, Tuple
 from warnings import warn
+from tqdm import tqdm
 
 import numpy as np
 from joblib import Parallel, delayed, effective_n_jobs
@@ -4152,6 +4153,9 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
     _nys_M: Optional[np.ndarray]  # np.float64, 2D[landmark, landmark] - Woodbury matrix M
     _nys_landmarks: Optional[np.ndarray]  # np.int64, 1D[landmark] - landmark indices
 
+
+    auto_bins_scheme: str
+
     # TODO PK v.3 use underscores here like RegressorMixin._estimator_type?
     available_explanations = ("global", "local", "confidence", "prediction_intervals")
     explainer_type = "inferable_model"
@@ -4175,7 +4179,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         outer_bags: int = 8,
         inner_bags: Optional[int] = 0,
         # Boosting
-        learning_rate: float = 0.02,
+        learning_rate: float = 1,
         max_rounds: Optional[int] = 200,
         early_stopping_rounds: Optional[int] = 50,
         early_stopping_tolerance: Optional[float] = 1e-5,
@@ -4201,7 +4205,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         min_bins_auto: int = 8,
         auto_bins_scheme: str = "quantile",
         # Statistical inference representation
-        bin_level_inference: bool = False,
+        bin_level_inference: bool = True,
     ):
         """Initialise the Inferable EBM with boulevard-style defaults and inference knobs.
 
@@ -4305,7 +4309,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             outer_bags=outer_bags,
             inner_bags=inner_bags,
             # Boosting - CRITICAL: learning_rate=1.0 for Boulevard averaging
-            learning_rate=1.0,  # Pure Boulevard averaging, no learning rate damping
+            learning_rate=learning_rate,  # Pure Boulevard averaging, no learning rate damping
             greedy_ratio=0.0,  # Pure cyclic boosting
             cyclic_progress=1.0,
             smoothing_rounds=0,  # No smoothing for statistical inference
@@ -4341,6 +4345,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         )
         
         # Store statistical inference specific parameters
+        self.boulevard_scale = (1+self.learning_rate)/self.learning_rate
         self.subsample_rate = subsample_rate
         self.truncation = truncation
         self.honest = honest
@@ -4350,9 +4355,11 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         self.nystrom_ridge = nystrom_ridge
         self.max_bins_auto = max_bins_auto
         self.min_bins_auto = min_bins_auto
-        self.auto_bins_scheme = (auto_bins_scheme or "quantile").lower()
-        if self.auto_bins_scheme not in {"quantile", "cube", "count"}:
+        self.auto_bins_scheme = auto_bins_scheme
+        normalized_scheme = (auto_bins_scheme or "quantile").lower()
+        if normalized_scheme not in {"quantile", "cube", "count"}:
             raise ValueError("auto_bins_scheme must be 'quantile', 'cube', or 'count'")
+        self._auto_bins_scheme = normalized_scheme
         self.bin_level_inference = bin_level_inference
         
         # Initialize statistical inference attributes
@@ -4391,7 +4398,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             raise NotImplementedError("init_score is not supported in InferableEBMRegressor.")
 
         X = np.asarray(X)
-        y = np.asarray(y, dtype=float, copy=False)
+        y = np.asarray(y, dtype=float)
         if X.ndim != 2:
             raise ValueError("X must be a 2D array.")
         if y.ndim != 1:
@@ -4402,7 +4409,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         n_samples, n_features = X.shape
 
         if sample_weight is not None:
-            sample_weight = np.asarray(sample_weight, dtype=float, copy=False)
+            sample_weight = np.asarray(sample_weight, dtype=float)
             if sample_weight.ndim != 1:
                 raise ValueError("sample_weight must be 1D.")
             if sample_weight.shape[0] != n_samples:
@@ -4418,7 +4425,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         sample_count = self.train_X_.shape[0]
         min_bins_auto = getattr(self, "min_bins_auto", 8)
         max_bins_auto = getattr(self, "max_bins_auto", 512)
-        auto_scheme = getattr(self, "auto_bins_scheme", "quantile")
+        auto_scheme = getattr(self, "_auto_bins_scheme", "quantile")
         adaptive_bins = _auto_bins_for_numeric(
             sample_count,
             min_bins_auto=min_bins_auto,
@@ -4532,6 +4539,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         preds = np.full(n_samples, self.intercept_, dtype=float)
 
         truncation = float(self.truncation)
+        learning_rate = float(self.learning_rate or 1.0)
         n_float = float(n_samples)
         max_rounds = int(self.max_rounds)
         max_leaves = self.max_leaves if self.max_leaves is not None else 3
@@ -4587,7 +4595,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                         None,
                         term_idx=0,
                         term_boost_flags=Native.TermBoostFlags_Default,
-                        learning_rate=1.0,
+                        learning_rate=learning_rate,
                         min_samples_leaf=min_leaf,
                         min_hessian=min_hessian,
                         reg_alpha=reg_alpha,
@@ -4634,11 +4642,11 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                     for feat_idx in range(n_features)
                 )
 
-            mu_total = 0.0
+            #mu_total = 0.0
             for feat_idx, new_scores, mu_local in results:
                 self.term_scores_[feat_idx] = new_scores
-                mu_total += mu_local
-            self.intercept_ += mu_total
+                #mu_total += mu_local
+            #self.intercept_ += mu_total
 
             # Refresh the intercept so that predictions remain unbiased after applying
             # the new feature contributions.  This mirrors the effect of Algorithm 1's
@@ -4663,11 +4671,10 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         )
         # 4a) Boulevard correction -- multiply term scores by 2
         for j in range(n_features):
-            self.term_scores_[j] = 2*self.term_scores_[j] 
+            self.term_scores_[j] = self.boulevard_scale * self.term_scores_[j] 
 
         # 5) Enforce centering + intercept consistency (additional safety)
         self._center_terms_and_fix_intercept()
-
         self.has_fitted_ = True
         self._build_structure_matrices()
 
@@ -4771,7 +4778,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                 base = np.sqrt(2.0) * sigma * norm
             else:
                 raise ValueError("mode must be 'confidence', 'prediction', or 'reproduction'")
-            widths[i] = 2.0 * z * base
+            widths[i] = self.boulevard_scale * z * base
 
         return preds, widths
 
@@ -4908,7 +4915,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         if not hasattr(self, 'train_X_') or self.train_X_ is None:
             self.centered_ = False
             return
-        
+
         if self.bin_level_inference:
             self._build_bin_level_structures()
             self.centered_ = True
