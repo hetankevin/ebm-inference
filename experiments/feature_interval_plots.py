@@ -121,6 +121,12 @@ def main() -> None:
     model.fit(X_train, y_train)
     print('Model fitted')
 
+    # Initialize training bins for statistical inference (this should be called automatically)
+    if hasattr(model, '_initialize_training_bins'):
+        model._initialize_training_bins()
+    else:
+        print('Warning: _initialize_training_bins method not available')
+
     inference_space = None if args.inference_space == "auto" else args.inference_space
 
     sigma_override = None
@@ -142,7 +148,9 @@ def main() -> None:
         else:
             sigma_override = None
 
-    baseline = np.mean(X, axis=0)
+    # Use center of feature space (0.5) as baseline for consistent visualization
+    # This avoids bias from training data distribution and provides a stable reference point
+    baseline = np.full(X.shape[1], 0.5)
     n_features = X.shape[1]
     grid = np.linspace(0.0, 1.0, args.n_points)
 
@@ -158,7 +166,18 @@ def main() -> None:
     else:
         axes = axes.reshape(-1)
     print('Forming intervals')
+    # Only plot features that have main-effect terms
+    available_features = list(model._feature_term_map_.keys())
+    
     for j, ax in tqdm(enumerate(axes)):
+        if j not in available_features:
+            ax.text(0.5, 0.5, f"Feature {j+1}\nNo main effect", 
+                   ha='center', va='center', transform=ax.transAxes,
+                   fontsize=12, bbox={"facecolor": "lightgray", "alpha": 0.8})
+            ax.set_xlabel(f"Feature {j+1}", fontsize=14)
+            ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
+            continue
+            
         X_grid = np.repeat(baseline[None, :], args.n_points, axis=0)
         X_grid[:, j] = grid
 
@@ -173,7 +192,7 @@ def main() -> None:
         )
         oracle = friedman_true_function(X_grid)
 
-        # Align the marginal mean with the oracle to resolve the GAM identification ambiguity.
+        # Apply small shift to align with oracle (should be minimal with proper baseline).
         oracle_mean = float(np.mean(oracle))
         pred_mean = float(np.mean(preds))
         shift = oracle_mean - pred_mean
