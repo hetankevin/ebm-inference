@@ -27,7 +27,7 @@ COLOR_RI = "#7CAE00"
 
 def true_function(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x)
-    return 2*np.sin(2 * np.pi * x) + 5 * x ** 2
+    return 2*np.sin(2 * np.pi * x) + 1 * x ** 2
 
 
 def simulate_data(n: int, noise: float, rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
@@ -59,43 +59,22 @@ def plot_panel(ax, x_train, y_train, grid, preds, lower, upper, mode_label, cove
 def main(args: Optional[argparse.Namespace] = None) -> None:
     if args is None:
         parser = argparse.ArgumentParser(description=__doc__)
-        parser.add_argument("--n-train", type=int, default=400, help="Number of training samples")
+        parser.add_argument("--n-train", type=int, default=1000, help="Number of training samples")
         parser.add_argument("--n-eval", type=int, default=400, help="Number of evaluation samples for coverage stats")
         parser.add_argument("--noise", type=float, default=1.0, help="Noise standard deviation")
         parser.add_argument("--level", type=float, default=0.95, help="Two-sided coverage level")
-        parser.add_argument("--max-rounds", type=int, default=200)
-        parser.add_argument("--max-bins", type=int, default=64)
-        parser.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1.0)
-        parser.add_argument("--truncation", type=float, default=3.0)
-        inf_group = parser.add_mutually_exclusive_group()
-        inf_group.add_argument(
-            "--bin-level-inference",
-            dest="bin_level_inference",
-            action="store_true",
-            help="Build inference objects in bin space.",
-        )
-        inf_group.add_argument(
-            "--sample-level-inference",
-            dest="bin_level_inference",
-            action="store_false",
-            help="Force inference objects to operate in sample space.",
-        )
-        parser.set_defaults(bin_level_inference=True)
-        parser.add_argument(
-            "--inference-space",
-            choices=["auto", "samples", "bins"],
-            default="auto",
-        )
-        nys_group = parser.add_mutually_exclusive_group()
-        nys_group.add_argument("--use-nystrom", dest='use_nystrom', action="store_true", help="Enable Nyström approximation")
-        nys_group.add_argument("--no-nystrom", dest='use_nystrom', action="store_false", help="Disable Nyström approximation")
-        parser.set_defaults(use_nystrom=False)
-        parser.add_argument("--nystrom-rank", type=int, default=64)
-        parser.add_argument("--nystrom-ridge", type=float, default=1e-6)
+        parser.add_argument("--max-rounds", type=int, default=100)
+        parser.add_argument("--max-bins", type=int, default=0)
+        parser.add_argument("--max-leaves", type=int, default=2**4)
+        parser.add_argument("--learning-rate", type=int, default=1.)
+        parser.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1.)
+        parser.add_argument("--truncation", type=float, default=100.0)
+        parser.add_argument("--warmup-rounds", type=int, default=0)
         parser.add_argument("--seed", type=int, default=0)
-        parser.add_argument("--calibrate-intervals", action="store_true", help="Calibrate prediction intervals on a validation split")
+        parser.add_argument("--calibrate-intervals", default=True, action="store_true", help="Calibrate prediction intervals on a validation split")
         parser.add_argument(
             "--propagate-calibration",
+            default=False,
             action="store_true",
             help="Apply the prediction-interval calibration factor to confidence and reproduction intervals",
         )
@@ -132,18 +111,15 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
     estimator = InferableEBMRegressor(
         max_rounds=args.max_rounds,
         max_bins=args.max_bins,
+        max_leaves = args.max_leaves,
+        warmup_rounds = args.warmup_rounds,
+        learning_rate = args.learning_rate,
         subsample_rate=args.subsample_rate,
         truncation=args.truncation,
         random_state=args.seed,
-        bin_level_inference=args.bin_level_inference,
-        use_nystrom=args.use_nystrom,
-        nystrom_rank=args.nystrom_rank,
-        nystrom_ridge=args.nystrom_ridge,
         auto_bins_scheme=args.auto_bins_scheme,
     )
     estimator.fit(x_train, y_train)
-
-    inference_space = None if args.inference_space == "auto" else args.inference_space
 
     sigma_override = None
     if args.calibrate_intervals and x_cal is not None:
@@ -160,7 +136,6 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
                 level=args.level,
                 mode="prediction",
                 sigma=sigma_override,
-                inference_space=inference_space,
                 propagate_to_ci_ri=args.propagate_calibration,
             )
 
@@ -173,21 +148,18 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         level=args.level,
         mode="confidence",
         sigma=sigma_override,
-        inference_space=inference_space,
     )
     ri_l, ri_u, _ = estimator.predict_intervals(
         X_grid,
         level=args.level,
         mode="reproduction",
         sigma=sigma_override,
-        inference_space=inference_space,
     )
     pi_l, pi_u, _ = estimator.predict_intervals(
         X_grid,
         level=args.level,
         mode="prediction",
         sigma=sigma_override,
-        inference_space=inference_space,
     )
 
     # Coverage on evaluation samples
@@ -197,21 +169,18 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         level=args.level,
         mode="confidence",
         sigma=sigma_override,
-        inference_space=inference_space,
     )
     ri_l_eval, ri_u_eval, _ = estimator.predict_intervals(
         X_eval,
         level=args.level,
         mode="reproduction",
         sigma=sigma_override,
-        inference_space=inference_space,
     )
     pi_l_eval, pi_u_eval, _ = estimator.predict_intervals(
         X_eval,
         level=args.level,
         mode="prediction",
         sigma=sigma_override,
-        inference_space=inference_space,
     )
 
     coverage_ci = float(np.mean((true_function(x_eval.ravel()) >= ci_l_eval) & (true_function(x_eval.ravel()) <= ci_u_eval)))
@@ -222,13 +191,12 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
     estimator_retrain = InferableEBMRegressor(
         max_rounds=args.max_rounds,
         max_bins=args.max_bins,
+        max_leaves = args.max_leaves,
+        warmup_rounds = args.warmup_rounds,
+        learning_rate = args.learning_rate,
         subsample_rate=args.subsample_rate,
         truncation=args.truncation,
-        random_state=args.seed + 17,
-        bin_level_inference=args.bin_level_inference,
-        use_nystrom=args.use_nystrom,
-        nystrom_rank=args.nystrom_rank,
-        nystrom_ridge=args.nystrom_ridge,
+        random_state=args.seed,
         auto_bins_scheme=args.auto_bins_scheme,
     )
     estimator_retrain.fit(x_new, y_new)

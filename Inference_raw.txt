@@ -1,0 +1,3308 @@
+Statistical Inference for Explainable Boosting Regression
+Anonymous Author
+Anonymous Institution
+Abstract
+Explainable boosting machines (EBMs) are
+popular “glass-box” models that maintain
+accuracy by boosting univariate trees and
+achieve explainability through clear visual-
+izations of each feature’s effect. However, un-
+like linear model coefficients, univariate EBM
+trees lack statistical inference, making it hard
+to know which features truly matter. We ad-
+dress this gap using recent advances in statis-
+tical inference for gradient boosting, provid-
+ing methods for statistical inference as well
+as end-to-end theoretical guarantees. Using
+a moving average instead of a sum of boosted
+trees (Boulevard regularization) allows the
+boosting process to converge to a feature-
+wise kernel ridge regression. This produces
+asymptotically normal predictions that are
+only quadratically worse than the minimax
+rate for nonparametric Lipschitz regression.
+We construct prediction intervals for the re-
+sponse and confidence intervals for each uni-
+variate predictor, enabling rigorous hypoth-
+esis tests for feature importance and further
+explainability within EBMs.
+1 Introduction
+Modern machine learning methods have proved highly
+successful, achieving impressively high performance
+even for incredibly complicated prediction tasks. Still,
+this comes at a cost. These methods have been cri-
+tiqued for their lack of transparency, often described
+as resulting in “black-box” models. Much work has
+been done in an attempt to provide explanations for
+Preliminary work. Under review by AISTATS 2026. Do
+not distribute.
+the behavior of black-box models.1
+Another line of
+work attempts to convince practitioners to instead use
+inherently transparent models that can be directly in-
+spected by humans (Rudin, 2019). In light of this, Ex-
+plainable Boosting Machines (EBM) Lou et al. (2012);
+Nori et al. (2019) have emerged as a popular “glass-
+box” model to strike the balance between both. In
+essence, an EBM is built to learn Generalized Additive
+Model (GAM) Hastie and Tibshirani (1986), where a
+signal f is assumed to be additive, i.e. f =
+Pp
+k=1 f(k)
+,
+where each f(k)
+is assumed to be a univariate func-
+tion of the k-th feature. This design allows the mea-
+surement of the marginal contribution of each feature
+like linear models, and where a justification for all
+the interpretation methods above is that they return
+the “correct” value for additive models. While EBMs
+impose strong structural constraints on the resulting
+prediction, their ability to reproduce noninearities,
+along with appropriate choices of additive structure,
+provides significant performance, often comparable to
+SoTA models such as XGBoost (Chen and Guestrin,
+2016), CatBoost (Prokhorenkova et al., 2018), Light-
+GBM (Ke et al., 2017).
+While EBMs provide a clear graphical representation
+for the effects of each feature, these are still point es-
+timates. The central question we ask for uncertainty
+quantification can be phrased as this: Given a model
+design, if we collect a new dataset and retrain the
+model, how different would our new prediction be? In
+response to this question, vanilla EBMs (Lou et al.,
+2012) proposed variance estimates via bootstrapping,
+providing coarse uncertainty quantification, though at
+the cost of more complex computation.
+In contrast to EBMs, spline-based GAMs enjoy a
+richer asymptotic theory. Wahba (1983) established
+the asymptotic distribution of smoothing spline es-
+timators via a Bayesian posterior covariance argu-
+ment, Silverman (1985) developed the equivalent ker-
+nel representation and convergence theory, and Nychka
+(1988) analyzed the frequentist coverage of Bayesian
+1
+Popular methods include LIME (Ribeiro et al., 2016),
+SHAP (Lundberg and Lee, 2017), ALE (Apley and Zhu,
+2020) and partial dependence (Friedman, 2001) plots.
+Manuscript under review by AISTATS 2026
+confidence intervals for smoothing splines. Built on
+these developments, Wood (2006) investigated the cov-
+erage of penalized regression spline intervals in the
+GAM setting, while Yoshida and Naito (2012) pro-
+vided a full asymptotic distribution theory for penal-
+ized spline estimators, establishing asymptotic normal-
+ity for each additive component.
+Despite this development Lou et al. (2012) argued for
+using boosted trees to represent additive components
+due to their adaptive smoothing behavior, providing
+performance advantages over splines, resuling in the
+EBM model. Statistical theory for boosting meth-
+ods is limited to small numbers of boosting rounds
+in Bühlmann (2002) and extended to structurally con-
+strained models including GAMs in Zhou and Hooker
+(2022). Here we employ the Boulevard regularization
+method (Zhou and Hooker, 2019), replacing sums of
+trees with averages in the training process, which we
+adapt to the additive model structure of EBMs. Boule-
+vard, particularly in conjunction with subsampling,
+naturally avoids overfitting; this both downweighs the
+influence of initial trees and allows us to study the
+model in the limit of infinite boosting rounds in which
+we can produce theoretical results without the need to
+select or constrain the number of rounds. In particu-
+lar, our work makes the following contributions
+• Asymptotic Theory. We establish a central
+limit theorem for EBM predictors, showing that
+the Boulevard-regularized ensemble converges to a
+feature-wise kernel ridge regression. The resulting
+predictions are asymptotically normal and achieve
+rates only quadratically worse than the minimax
+rate for Lipschitz regression.
+• Frequentist Inference. By leveraging our pro-
+posed CLT for baseline vector β and feature-wise
+predictions f̂(k)
+, we extend the heuristic bootstrap
+to a set of inference toolkits: Formal confidence
+intervals, prediction intervals and reproduction
+intervals Zhou and Hooker (2019). This also al-
+lows a direct test of variable importance following
+the methods of Mentch and Hooker (2015). We
+round out those propositions by numerical exper-
+iments to back up the validity of our algorithms.
+• Computational Efficiency. Unlike prior infer-
+ential approaches for random forests and boost-
+ing, we provide two methods to achieve speedups.
+One exploits the Nyström approximation of
+Musco and Musco (2017), while the other exploits
+the fact that modern implementations of regres-
+sion trees use histograms. Both allow for inference
+in linear time in the number of datapoints.
+Interaction models?
+exploitation of basis representation?
+need to sketch out results and simulations
+2 Setup
+In this section, we introduce the problem setup with
+specified notations, as well as the assumptions this
+study build on.
+Our goal is to learn a signal f that is additive with the
+form as this.
+Assumption 2.1 (Additive Lipschitz Nonparametric
+Regression). Let the response satisfy
+y = β +
+p
+X
+k=1
+f(k)
+(x(k)
+) + ϵ := f(x) + ϵ,
+where y, β ∈ R, x = (x(1)
+, . . . , x(p)
+)⊤
+∈ Rp
+, and ε are
+i.i.d. sub–Gaussian errors with mean zero and variance
+σ2
+< ∞. Assume the covariates have a bounded den-
+sity on their support: ∃ 0 < c1 ≤ µ(x) ≤ c2 < ∞.
+Each component function f(k)
+: R → R is mean–zero
+with respect to the marginal of x(k)
+, and is L-Lipschitz
+continuous.The intercept vector β is defined as the un-
+conditional mean of the response,
+β = Ex,ϵ[y] =
+Z
+y dµx(x) dµϵ(ϵ).
+Each component function f(k)
+is mean–zero with re-
+spect to the marginal of x(k)
+.
+Under such signal structure, we label each machine at
+boosting round b using feature k in Algorithm 1 as
+f̂(k)
+(x).
+3 Assumption
+1. Additive Lipschitz Nonparametric Regres-
+sion: Let the response satisfy
+y = β +
+p
+X
+k=1
+f(k)
+(x(k)
+) + ϵ := f(x) + ϵ,
+where y, β ∈ R, x = (x(1)
+, . . . , x(p)
+)⊤
+∈ Rp
+,
+and ε are i.i.d. sub–Gaussian errors with mean
+zero and variance σ2
+< ∞. Assume the covari-
+ates have a bounded density on their support:
+∃ 0 < c1 ≤ µ(x) ≤ c2 < ∞. Each component
+function f(k)
+: R → R is mean–zero with respect
+to the marginal of x(k)
+, and is L-Lipschitz con-
+tinuous.The intercept vector β is defined as the
+unconditional mean of the response,
+β = Ex,ϵ[y] =
+Z
+y dµx(x) dµϵ(ϵ).
+Manuscript under review by AISTATS 2026
+Each component function f(k)
+is mean–zero with
+respect to the marginal of x(k)
+.
+2. Structure-Value Isolation: The structure of
+any tree is independent of the prediction made by
+the terminal nodes. Algebraically, for a single tree
+at iteration b for feature k, one can write the pre-
+diction on a training set X as a linear map from
+the observed vector y to the prediction:t̂(x) =
+S
+(k)
+b y, where S
+(k)
+b is the tree structure matrix de-
+fined below:
+S
+(k)
+i,j =
+
+1(x
+(k)
+j ∈A(x
+(k)
+i ))1(j∈w)
+Pn
+l=1 1(x
+(k)
+l ∈A(x
+(k)
+i ))1(l∈w)
+
+3. Non-adaptivity There exists a measure Q
+(k)
+n on
+the space of tree structures such that after some
+burn-in period b′
+, each individual univariate tree
+structure constructed using feature k is an inde-
+pendent draw from Q
+(k)
+n .
+4. Partition Distinctness: After the burn-in pe-
+riod, let E[S(k)
+] denote the expected structure ma-
+trix for trees trained on feature k under Q
+(k)
+n . We
+assume there exists a constant c3 < 1 such that
+for all distinct features a ̸= k, c3(p − 1) < 1 and
+E[S(a)
+] E[S(k)
+] ≤ c3.
+5. Shrinking Volume For any ν > 0, the mini-
+mal leaf size is shrinking at rate vn = n− d+1
+d+2 +ν
+<
+n− d
+d+1 := O(dd
+n).
+6. Asymptotic Locality We introduce a sequence
+{dn} with dn > 0, dn → 0, by which the diameter
+of any leaf is bounded from above. We require
+sup
+A∈q∈Qn
+diam(A) = O(dn), dn = O
+
+n− 1
+d+1
+
+.
+7. Increasing Leaf The minimal number of points
+within one leaf is lower bounded by
+inf
+A∈Π∈Q
+(k)
+n
+n
+X
+i=1
+I(xi,n ∈ A) = Ω(n
+1
+d+2 )
+4 Algorithms
+References
+Apley, D. W. and Zhu, J. (2020). Visualizing the ef-
+fects of predictor variables in black box supervised
+learning models. Journal of the Royal Statistical So-
+ciety Series B: Statistical Methodology, 82(4):1059–
+1086.
+Algorithm 1 Inferable EBM
+1: Input: X ∈ Rn×p
+, y ∈ Rn
+, subsample rate ξ,
+rounds B, truncation level M > 0.
+2: Init: β0 ← 1
+n
+Pn
+i=1 yi; f
+(0)
+k ← 0 for all k.
+3: for b = 1 to B do
+4: for k = 1 to p in parallel do
+5: Sample Gb,k ⊂ {1, . . . , n} i.i.d. each i w.p.
+ξ.
+6: ri,k ← yi −
+
+β0 +
+P
+ℓ f
+(b−1)
+ℓ (x
+(ℓ)
+i )
+
+for i ∈
+Gb,k.
+7: Fit tree t(b,k)
+to {(x
+(k)
+i , ri,k)}i∈Gb,k
+.
+8: µb,k ← 1
+n
+Pn
+i=1 t(b,k)
+(x
+(k)
+i ).
+9: t̃(b,k)
+(x) ← t(b,k)
+(x) − µb,k.
+10: t̃(b,k)
+(x) ← max{−M, min{t̃(b,k)
+(x), M}}
+for all x.
+11: β0 ← β0 + µb,k.
+12: f
+(b)
+k ← b−1
+b f
+(b−1)
+k + 1
+b t̃(b,k)
+.
+13: end for
+14: end for
+15: Output: ˆ
+f(x) = β0 + 2
+Pp
+k=1 f
+(B)
+k (x(k)
+) with
+P
+i f
+(B)
+k (x
+(k)
+i ) = 0 for all k.
+Bühlmann, P. (2002). Consistency for l2-boosting
+and matching pursuit with trees and tree-type basis
+functions. In Research Report/Seminar für Statis-
+tik, Eidgenössische Technische Hochschule (ETH),
+volume 109. Seminar für Statistik, Eidgenössische
+Technische Hochschule (ETH).
+Chen, T. and Guestrin, C. (2016). Xgboost: A scal-
+able tree boosting system. In Proceedings of the
+22nd ACM SIGKDD International Conference on
+Knowledge Discovery and Data Mining, KDD ’16,
+page 785–794. ACM.
+Friedman, J. H. (2001). Greedy function approxima-
+tion: a gradient boosting machine. Annals of statis-
+tics, pages 1189–1232.
+Hastie, T. and Tibshirani, R. (1986). Generalized Ad-
+ditive Models. Statistical Science, 1(3):297 – 310.
+Ke, G., Meng, Q., Finley, T., Wang, T., Chen, W.,
+Ma, W., Ye, Q., and Liu, T.-Y. (2017). Lightgbm:
+A highly efficient gradient boosting decision tree.
+In Guyon, I., Luxburg, U. V., Bengio, S., Wallach,
+H., Fergus, R., Vishwanathan, S., and Garnett, R.,
+editors, Advances in Neural Information Processing
+Systems, volume 30. Curran Associates, Inc.
+Lou, Y., Caruana, R., and Gehrke, J. (2012). Intelligi-
+ble models for classification and regression. In Pro-
+ceedings of the 18th ACM SIGKDD International
+Conference on Knowledge Discovery and Data Min-
+ing, KDD ’12, page 150–158, New York, NY, USA.
+Association for Computing Machinery.
+Manuscript under review by AISTATS 2026
+Lundberg, S. M. and Lee, S.-I. (2017). A unified ap-
+proach to interpreting model predictions. Advances
+in neural information processing systems, 30.
+Mentch, L. and Hooker, G. (2015). Quantifying un-
+certainty in random forests via confidence intervals
+and hypothesis tests.
+Musco, C. and Musco, C. (2017). Recursive sampling
+for the nyström method.
+Nori, H., Jenkins, S., Koch, P., and Caruana, R.
+(2019). Interpretml: A unified framework for ma-
+chine learning interpretability.
+Nychka, D. (1988). Bayesian confidence intervals for
+smoothing splines. Journal of the American Statis-
+tical Association, 83(404):1134–1143.
+Prokhorenkova, L., Gusev, G., Vorobev, A., Doro-
+gush, A. V., and Gulin, A. (2018). Catboost: unbi-
+ased boosting with categorical features. In Proceed-
+ings of the 32nd International Conference on Neu-
+ral Information Processing Systems, NIPS’18, page
+6639–6649, Red Hook, NY, USA. Curran Associates
+Inc.
+Ribeiro, M. T., Singh, S., and Guestrin, C. (2016).
+” why should i trust you?” explaining the predic-
+tions of any classifier. In Proceedings of the 22nd
+ACM SIGKDD international conference on knowl-
+edge discovery and data mining, pages 1135–1144.
+Rudin, C. (2019). Stop explaining black box machine
+learning models for high stakes decisions and use
+interpretable models instead. Nature machine intel-
+ligence, 1(5):206–215.
+Silverman, B. W. (1985). Some aspects of the spline
+smoothing approach to non-parametric regression
+curve fitting. Journal of the Royal Statistical So-
+ciety: Series B (Methodological), 47(1):1–21.
+Wahba, G. (1983). Bayesian ”confidence intervals” for
+the cross-validated smoothing spline. Journal of the
+Royal Statistical Society. Series B (Methodological),
+45(1):133–150.
+Wood, S. N. (2006). On confidence intervals for gen-
+eralized additive models based on penalized regres-
+sion splines. Australian & New Zealand Journal of
+Statistics, 48(4):445–464.
+Yoshida, T. and Naito, K. (2012). Asymptotics for
+penalized splines in generalized additive models.
+Zhou, Y. and Hooker, G. (2019). Boulevard: Regu-
+larized stochastic gradient boosted trees and their
+limiting distribution.
+Zhou, Y. and Hooker, G. (2022). Decision tree boosted
+varying coefficient models. Data Mining and Knowl-
+edge Discovery, 36(6):2237–2271.
+Manuscript under review by AISTATS 2026
+A Binning
+A.1 Bin-level Decomposition of the Structure Matrix
+In the special case where one uses histogram trees, there is a simpler form for the structure vector and ma-
+trix. When one performs binning automatically during pre-fitting, we can store the structure matrix in such a
+decomposition:
+S(k)
+= b(k)
+n B(k)
+b(k)
+n
+⊤
+, B
+(k)
+i,j =
+
+1(B
+(k)
+j ∈A(B
+(k)
+i ))
+Pmk
+l=1 1(B
+(k)
+l ∈A(B
+(k)
+i ))
+
+mk×mk
+, (b(k)
+n )i,j =
+
+1(x
+(k)
+i ∈ B
+(k)
+j )
+Pmk
+l=1 1
+
+B
+(k)
+l ∈A(B
+(k)
+j )
+
+Pn
+q=1 1
+
+x
+(k)
+q ∈A(B
+(k)
+j )
+
+
+n×mk
+,
+where A(·) is the leaf that the bin (or sample) in its argument is in. The matrix B(k)
+then is the bin-structure
+matrix where the i, j-th entry contains the indicators of whether bin i is in the same leaf as bin j, normalized
+by the number of bins in the same leaf as bin i.
+We now introduce a few more definitions:
+1. Bin index of a sample. For each sample i, let r
+(k)
+i ∈ {1, . . . , mk} be the unique bin index with
+x
+(k)
+i ∈ B
+(k)
+r
+(k)
+i
+. That is, this is the index of the histogram bin that sample i belongs to along feature k.
+2. The set of bins in a given leaf. For a bin index r, define the set of bins in the unique tree leaf containing
+the bin B
+(k)
+r with index r along feature k:
+L(k)
+(r) :=
+n
+s ∈ {1, . . . , mk} : B(k)
+s ∈ A
+
+B(k)
+r
+o
+.
+These are exactly the bins merged together by the tree into the same terminal node as bin r.
+3. How many samples are in each bin, and how many bins are there in each leaf?
+The bin count n
+(k)
+s , or the number of samples in bin s along feature k, is given by:
+n(k)
+s :=
+n
+X
+j=1
+1
+
+x
+(k)
+j ∈ B(k)
+s
+
+.
+The leaf sample count N
+(k)
+L(r) and leaf bin count L(k)
+(r) are given by:
+N
+(k)
+L(r) :=
+X
+q∈L(k)(r)
+n(k)
+q , L(k)
+(r) :=
+mk
+X
+q=1
+1
+
+q ∈ L(k)
+(r)
+
+.
+The leaf sample count N
+(k)
+L(r) denotes how many training samples ended up in the leaf containing bin r. The
+leaf bin count L(k)
+(r) denotes how many bins that the leaf containing bin r aggregates.
+4. The assignment matrix of samples to bins.
+Z(k)
+n ∈ {0, 1}n×mk
+, with Z
+(k)
+i,j := 1
+
+r
+(k)
+i = j
+
+= 1
+
+x
+(k)
+i ∈ B
+(k)
+j
+
+.
+This is the matrix where the i, j-th entry is 1 of sample i is in bin j, and 0 otherwise. Note that each sample
+lives in exactly one bin, so each row of Z
+(k)
+n has a single 1.
+5. Leaf-wise rescaling from bin-space to sample-space.
+Define a diagonal matrix D(k)
+= diag
+
+ξ
+(k)
+1 , . . . , ξ
+(k)
+mk
+
+with
+Manuscript under review by AISTATS 2026
+ξ(k)
+r :=
+v
+u
+u
+t
+L(k)(r)
+N
+(k)
+L(r)
+=
+Pmk
+l=1 1
+
+B
+(k)
+l ∈ A(B
+(k)
+r )
+
+Pn
+i=1 1
+
+x
+(k)
+i ∈ A(B
+(k)
+r )
+ =
+s
+Number of bins in leaf containing bin r
+Number of training samples in leaf containing bin r
+.
+The intuition is as follows. B(k)
+normalizes over bins in a leaf, while S(k)
+normalizes over samples in a leaf.
+Some bins have more samples than others. We must therefore correct the bin-structure matrix so that it
+normalizes over samples rather than bins, and so we construct D(k)
+to do exactly that. Note ξ
+(k)
+r is constant
+within a leaf, in the sense that if bins s and r are in the same leaf, we will then have ξ
+(k)
+r = ξ
+(k)
+s .
+We then have the following result.
+Lemma A.1 (Bin-Level Decomposition of Structure Matrix). We can decompose the structure matrix as follows:
+S(k)
+n = b(k)
+n B(k)
+b(k)
+n
+⊤
+, B
+(k)
+i,j =
+
+1(B
+(k)
+j ∈A(B
+(k)
+i ))
+Pmk
+l=1 1(B
+(k)
+l ∈A(B
+(k)
+i ))
+
+mk×mk
+, b(k)
+n = Z(k)
+n D(k)
+∈ Rn×mk
+.
+Similarly, we can also decompose the structure vector into the structure vector in bin space transformed to sample
+space:
+s(k)
+n (x) = b(k)
+n b(k)
+(x), b(k)
+(x)⊤
+=
+1(B
+(k)
+j ∈ A(x))
+Pmk
+l=1 1(B
+(k)
+l ∈ A(x))
+!
+j=1,...,mk
+.
+Proof. Examine the i, j-th entry of the decomposition.
+
+b(k)
+n B(k)
+b(k)⊤
+n
+
+i,j
+=
+mk
+X
+r=1
+mk
+X
+s=1
+Z
+(k)
+i,r ξ(k)
+r B(k)
+r,s ξ(k)
+s Z
+(k)
+j,s
+Since Z
+(k)
+i,. and Z
+(k)
+j,. are both one-hot vectors, the double sum collapses to
+
+b(k)
+n B(k)
+b(k)⊤
+n
+
+i,j
+= ξ
+(k)
+r
+(k)
+i
+B
+(k)
+r
+(k)
+i ,r
+(k)
+j
+ξ
+(k)
+r
+(k)
+j
+,
+where r
+(k)
+i is the bin index of the i-th sample across feature k.
+There are two cases. First, if the i-th and j-th samples are not in the same leaf, then B
+(k)
+r
+(k)
+i ,r
+(k)
+j
+= 0, so the entry
+is 0 . This matches
+
+S
+(k)
+n
+
+i,j
+= 0.
+Otherwise, both bins lie in the same leaf L := L(k)
+
+r
+(k)
+i
+
+= L(k)
+
+r
+(k)
+j
+
+. Then
+B
+(k)
+r
+(k)
+i ,r
+(k)
+j
+=
+1
+|L|
+, ξ
+(k)
+r
+(k)
+i
+= ξ
+(k)
+r
+(k)
+j
+=
+s
+|L|
+N
+(k)
+L
+.
+Hence
+ξ
+(k)
+r
+(k)
+i
+B
+(k)
+r
+(k)
+i ,r
+(k)
+j
+ξ
+(k)
+r
+(k)
+j
+=
+s
+|L|
+N
+(k)
+L
+!
+·
+1
+|L|
+·
+s
+|L|
+N
+(k)
+L
+!
+=
+1
+N
+(k)
+L
+.
+But
+
+S(k)
+n
+
+i,j
+=
+1
+
+x
+(k)
+j ∈ A
+
+x
+(k)
+i
+
+Pn
+ℓ=1 1
+
+x
+(k)
+ℓ ∈ A
+
+x
+(k)
+i
+ =
+1
+N
+(k)
+L
+when x
+(k)
+j shares leaf L with x
+(k)
+i .
+Manuscript under review by AISTATS 2026
+Thus
+
+b
+(k)
+n B(k)
+b
+(k)⊤
+n
+
+i,j
+=
+
+S
+(k)
+n
+
+i,j
+in all cases.
+The proof for the structure vector follows analogously.
+A.2 Computing the Kernel Vector in Bin Space
+We are interested in computing the expectations
+k(k)
+n (x):
+= E
+h
+b(k)
+(x)⊤
+b(k)
+n
+⊤
+i
+∈ R1×n
+, K(k)
+n := E[S(k)
+n ] = E
+h
+b(k)
+n B(k)
+b(k)
+n
+⊤
+i
+, K =
+p
+X
+k=1
+E
+h
+b(k)
+n B(k)
+b(k)
+n
+⊤
+i
+,
+and the norm of the weighting vector
+r(k)
+(x)⊤
+:= E[b(k)
+n b(k)
+(x)]⊤
+Jn[I + JnK]−1
+,
+where Jn is the centering matrix Jn = In − 1
+n 1n1⊤
+n .
+Structure vectors and matrices. We first turn our attention to the structure matrix. First note that
+as the expectation is taken over the ensemble, and the bin assignments are the same for every member of the
+ensemble, we can pull Z
+(k)
+n out of the expectation. We then have
+K(k)
+n = E[S(k)
+n ] = E
+h
+b(k)
+n B(k)
+b(k)
+n
+⊤
+i
+= Z(k)
+n E
+h
+D(k)
+B(k)
+D(k)
+i
+Z(k)
+n
+⊤
+.
+The overall kernel matrix then can be written as:
+K =
+p
+X
+k=1
+E
+h
+b(k)
+n B(k)
+b(k)
+n
+⊤
+i
+= Z(k)
+n
+p
+X
+k=1
+E
+h
+D(k)
+B(k)
+D(k)
+i
+!
+Z(k)
+n
+⊤
+The weight vector can then be written as
+r(k)
+n (x)⊤
+:= E[b(k)
+n b(k)
+(x)]⊤
+Jn[I + JnK]−1
+=
+
+Z(k)
+n E[D(k)
+b(k)
+(x)]
+⊤
+Jn
+"
+I + JnZ(k)
+n
+p
+X
+k=1
+E
+h
+D(k)
+B(k)
+D(k)
+i
+!
+Z(k)
+n
+⊤
+#−1
+Now write h(k)
+(x) = E[D(k)
+b(k)
+(x)] ∈ Rm
+, H =
+Pp
+k=1 E
+
+D(k)
+B(k)
+D(k)
+
+, and note that we can express k
+(k)
+n (x) =
+Z
+(k)
+n h(k)
+(x) ∈ Rn
+. The weight vector is then:
+r(k)
+n (x) =
+h
+In + JnZ(k)
+n H(k)
+Z(k)
+n
+⊤
+i−1
+Jnk(k)
+n (x).
+Woodbury inverse. An application of the Woodbury formula ((I + UCV )−1
+= I − U C−1
++ V U
+−1
+V with
+U = JnZ
+(k)
+n , C = H, V = Z
+(k)
+n
+⊤
+) yields:
+h
+In + JnZ(k)
+n HZ(k)
+n
+⊤
+i−1
+= In − JnZ(k)
+n
+h
+H−1
++ Z(k)
+n
+⊤
+JnZ(k)
+n
+i−1
+| {z }
+:=M(k)−1
+Z(k)
+n
+⊤
+.
+Bin–space compression (for the norm). Let c(k)
+:= Z
+(k)⊤
+n 1n ∈ Rmk
+be the bin counts. Then
+Z(k)⊤
+n Jn Z(k)
+n = Z(k)⊤
+n Z(k)
+n −
+1
+n
+Z(k)⊤
+n 1n1⊤
+n Z(k)
+n = diag(c(k)
+) −
+1
+n
+c(k)
+c(k)⊤
+.
+Manuscript under review by AISTATS 2026
+So defining
+M(k)
+:= H−1
++ diag(c(k)
+) −
+1
+n
+c(k)
+c(k)⊤
+,
+we can express
+r(k)
+n (x) =
+h
+In − JnZ(k)
+n M(k)−1
+Z(k)
+n
+⊤
+i
+Jnk(k)
+n (x) = Jnk(k)
+n (x) − JnZ(k)
+n M(k)−1
+Z(k)
+n
+⊤
+Jnk(k)
+n (x).
+It now falls to us to note that the quantity on the very right of the above expression can be expressed as:
+z(k)
+(x) := Z(k)
+n
+⊤
+Jnk(k)
+n (x)
+= Z(k)
+n
+⊤
+JnZ(k)
+n h(k)
+(x)
+=
+
+diag(c(k)
+) −
+1
+n
+c(k)
+c(k)⊤
+
+h(k)
+(x)
+= diag(c(k)
+)h(k)
+(x) −
+c(k)⊤
+h(k)
+(x)
+n
+c(k)
+.
+To recall, we now have, for
+M(k)
+:= H−1
++ diag(c(k)
+) −
+1
+n
+c(k)
+c(k)⊤
+, z(k)
+(x) := diag(c(k)
+)h(k)
+(x) −
+c(k)⊤
+h(k)
+(x)
+n
+c(k)
+,
+we can express
+r(k)
+n (x) = JnZ(k)
+n h(k)
+(x) − JnZ(k)
+n M(k)−1
+z(k)
+(x).
+Now, we can solve the small mk × mk system of linear equations for w(k)
+given by
+M(k)
+w(k)
+= z(k)
+(x),
+to obtain the solution w(k)
+:= M(k)−1
+z(k)
+(x). We can then set q(k)
+(x) := h(k)
+(x) − w(k)
+(x), and observe that
+r(k)
+n (x) = Jn Z(k)
+n q(k)
+(x).
+To find its norm we simply compute:
+∥r(k)
+n (x)∥2
+2 = r(k)
+n
+⊤
+r(k)
+n
+= q(k)
+(x)⊤
+Z(k)
+n
+⊤
+Jn Jn Z(k)
+n q(k)
+(x)
+= q(k)
+(x)⊤
+Z(k)
+n
+⊤
+Jn Z(k)
+n q(k)
+(x)
+= q(k)
+(x)⊤
+
+diag(c(k)
+) −
+1
+n
+c(k)
+c(k)⊤
+
+q(k)
+(x)
+= q(k)
+(x)⊤
+diag(c(k)
+) q(k)
+(x) −
+1
+n
+
+c(k)⊤
+q(k)
+(x)
+2
+.
+The final algorithm.
+1. Construct and cache diagonal matrix D(k)
+= diag
+
+ξ
+(k)
+1 , . . . , ξ
+(k)
+mk
+
+, with
+ξ(k)
+r :=
+v
+u
+u
+t
+L(k)(r)
+N
+(k)
+L(r)
+=
+Pmk
+l=1 1
+
+B
+(k)
+l ∈ A
+
+B
+(k)
+r
+
+Pn
+i=1 1
+
+x
+(k)
+i ∈ A
+
+B
+(k)
+r
+ =
+s
+Number of bins in leaf containing bin r
+Number of training samples in leaf containing bin r
+.
+2. Construct and cache bin-level structure matrix and transform
+B
+(k)
+i,j =
+
+
+1
+
+B
+(k)
+j ∈ A
+
+B
+(k)
+i
+
+Pmk
+l=1 1
+
+B
+(k)
+l ∈ A
+
+B
+(k)
+i
+
+
+
+mk×mk
+, b(k)
+n = Z(k)
+n D(k)
+.
+Manuscript under review by AISTATS 2026
+3. On the fly, compute bin-level structure vector
+b(k)
+(x)⊤
+=
+
+
+1
+
+B
+(k)
+j ∈ A(x)
+
+Pmk
+l=1 1
+
+B
+(k)
+l ∈ A(x)
+
+
+
+j=1,...,mk
+.
+4. Estimate h(k)
+(x) = E
+
+D(k)
+b(k)
+(x)
+
+∈ Rm
+, H =
+Pp
+k=1 E
+
+D(k)
+B(k)
+D(k)
+
+over the ensemble, caching the
+latter.
+5. Compute and cache bin-counts c(k)
+:= Z
+(k)
+n
+⊤
+1n.
+6. Construct and cache M(k)
+:= H−1
++ diag c(k)
+
+− 1
+n c(k)
+c(k)⊤
+.
+7. On the fly, solve M(k)
+w(k)
+= z(k)
+(x) for w(k)
+.
+8. Set q(k)
+(x) := h(k)
+(x) − w(k)
+(x).
+9. Compute
+∥r(k)
+n (x)∥2 =
+r
+q(k)(x)⊤ diag(c(k)) q(k)(x) −
+1
+n
+
+c(k)⊤
+q(k)(x)
+2
+.
+B Finite Sample Convergence
+B.1 A Fixed-point Iteration
+To investigate the finite sample convergence behavior of the algorithm, we begin with a set of postulated fixed
+point. For each subensemble’s prediction on the training set, assume the existence of a fixed point ỹ∗
+k. Then the
+Inferable EBM update rule leads to the following fixed point iteration:
+ỹ∗
+k =
+1
+b + 1
+
+(I −
+1
+n
+11⊤
+)S(k)
+(y − ŷ) + bỹ∗
+k
+
+Rearranging the equation gives the following identity
+ỹ∗
+k = (I −
+1
+n
+11⊤
+)S(k)
+(y − ŷ) (1)
+Since we do not know ŷ, we will solve for it and plug it back later. Sum the equations over k yields:
+ŷ := β̂
+∗
++
+p
+X
+k=1
+ỹ∗
+k = β̂
+∗
++ (I −
+1
+n
+11⊤
+)(
+p
+X
+k=1
+S(k)
+)(y − ŷ)
+And by the design of identifiability constraint, at fixed points, all residuals should have mean zero:
+1
+n
+1⊤
+(y − ŷ) = 0 →
+1
+n
+1⊤
+(y − β̂
+∗
+−
+p
+X
+k=1
+f(k)
+) = 0 → β̂
+∗
+= ȳ =
+1
+n
+11⊤
+y
+Plugging this back we have
+ŷ =
+h
+I + (I −
+1
+n
+11⊤
+)(
+X
+k
+S(k)
+)
+i−1h
+(I −
+1
+n
+11⊤
+)(
+X
+k
+S(k)
+) +
+1
+n
+11⊤
+i
+y (2)
+Plugging it back to equation 1 produces the fixed-points for each subensemble:
+Manuscript under review by AISTATS 2026
+ỹ∗
+k = (I −
+1
+n
+11⊤
+)S(k)
+
+I −
+
+I + (I −
+1
+n
+11⊤
+)(
+X
+k
+S(k)
+)
+−1
+(I −
+1
+n
+11⊤
+)(
+X
+k
+S(k)
+) +
+1
+n
+11⊤
+
+
+y (3)
+The intercept term is canceled out following the algebra below: First, notice that
+
+I + (I −
+1
+n 11⊤
+)(
+Pp
+k=1 S(k)
+)
+
+( 1
+n 11⊤
+) = ( 1
+n 11⊤
+), since the row sum of S(k)
+is always one and thus eliminated by
+the centering operator. Multiplying both side by
+
+I + (I − 1
+n 11⊤
+)(
+Pp
+k=1 S(k)
+)
+−1
+implies
+
+I + (I −
+1
+n 11⊤
+)(
+Pp
+k=1 S(k)
+)
+−1
+( 1
+n 11⊤
+) = ( 1
+n 11⊤
+). This, once again, is killed by the composition (I − 1
+n 11⊤
+)S(k)
+. Hence
+the intercept would not matter in the final fixed point derivation.
+Assuming the invertibility of
+
+I + (I − 1
+n 11⊤
+)(
+P
+k S(k)
+)
+
+. The resolvent identity yields
+ỹ∗
+k = (I −
+1
+n
+11⊤
+)S(k)
+
+I + (I −
+1
+n
+11⊤
+)(
+X
+k
+S(k)
+)
+−1
+y := JnS(k)
+[I + JnK]−1
+y (4)
+The corresponding pointwise prediction for ∀x ∈ Rp
+is
+f̂(k)
+(x) = s(k)
+(x)Jn[I + JnK]−1
+y
+B.2 Specialized Tree Kernels
+Backfitting is known to fail under heavy multicollinearity: the ensemble predictions may converge, but the
+feature-wise functionals do not, due to non-identifiability. In our setting, this manifests as large overlaps between
+the kernel spaces of different features. To guarantee convergence, we must ensure that the residuals from other
+features are not fully contained in the kernel space of the current feature. When features are independent, this
+holds automatically; when they are correlated, it suffices to bound the cross-feature overlap strictly below one.
+In practice, we enforce the centering condition
+n
+X
+i=1
+fk(x
+(k)
+i ) = 0, ∀k,
+which removes the global constant direction, thereby eliminating the trivial overlap between feature-specific
+structure matrices. Formally, we state the setup below.
+Consider two features X(a)
+and X(k)
+. Define the maximal correlation
+ρ∗(X(a)
+, X(k)
+) = sup
+g,h
+E[g]=E[h]=0
+E[g2
+]=E[h2
+]=1
+E[ g(X(a)
+) h(X(k)
+) ].
+This quantity equals the operator norm of the conditional–expectation projections: ∥PaPk∥ = ρ∗(X(a)
+, X(k)
+),
+where Pkf = E[f | X(k)
+] is the L2
+projection onto functions of feature k. In particular, if features are not
+perfectly collinear, then ρ∗(X(a)
+, X(k)
+) < 1.
+In the finite-sample case, a tree grown on feature k induces a partition Πk of the sample indices. Its structure
+matrix SΠk
+is the orthogonal projector in Rn
+onto vectors constant on each leaf. Under SVI and Non–adaptivity,
+averaging over trees yields an expected structure matrix E[S(k)
+] that depends only on the marginal distribution
+of X(k)
+. As n → ∞, these expected matrices converge to the population projection Pk. Hence after burn-in, the
+overlap between two expected structure matrices is asymptotically controlled by the maximal correlation:
+E[S(a)
+] E[S(k)
+] ≤ ρ∗ X(a)
+, X(k)
+
++ on(1).
+Thus, no perfect collinearity implies a strict bound < 1. A sufficient margin for contraction is
+Manuscript under review by AISTATS 2026
+sup
+a̸=k
+ρ∗ X(a)
+, X(k)
+
+<
+1
+p − 1
+,
+which ensures ∥L∥ ≤ (p − 1)c3 < 1 in the block–operator bound. Geometrically, we are looking at two partitions
+that does not vote more than n
+p−1 points in same leaves, which suggest a uniform expansion of our observed data
+points in regions as we move into higher dimensions.Equivalently, one may assume the row–sum incoherence
+condition
+max
+k
+X
+a̸=k
+∥E[S(k)
+]E[S(a)
+]∥ < 1,
+B.3 Contraction
+Under stated assumptions, we can prove that Algorithm 1’s prediction converge almost surely to a postulated
+fixed point presented in Equation ??. Formally, we make use of Theorem D.1, called a stochastic contraction
+mapping theorem, to demonstrate the difference between the current prediction and the fixed point is a stochastic
+contraction mapping.
+Theorem B.1. Denote the prediction using feature k at boosting round b as ŷ
+(k)
+b = 1
+b
+Pb
+s=1 t(s,k)
+(x(k)
+). Define
+the aggregated kernel Kn :=
+Pp
+k=1(I − ES(k)
+)†
+(I − 1
+n 11⊤
+)ES(k)
+. Suppose for each feature, there exists a fixed
+point:
+ỹ∗
+k = (I − ES(k)
+)†
+(I −
+1
+n
+11⊤
+)ES(k)
+h
+I −
+
+I + Kn
+†
+Kn
+i
+y
+which implies a global fixed point
+ŷ∗
+= β̂
+∗
++ Kn
+h
+I −
+
+I + Kn
+†
+Kn
+i
+y
+Then ŷ
+(k)
+b
+a.s.
+→ ỹ∗
+k and ŷb
+a.s.
+→ ŷ∗
+under stated assumptions in 3. In the meantime, β̂
+∗ a.s.
+→ ȳ := 1
+n 1⊤
+y.
+Proof. Denote D
+(k)
+b = ŷ
+(k)
+b − ỹ∗
+k. Define the stacked distance vector Db = [D
+(1)
+b , · · · , D
+(p)
+b ]⊤
+∈ Rnp
+. Showing
+this random vector is a stochastic contraction mapping suffices to establish coordinate-wise convergence.
+For each coordinate, the conditional mean satisfies
+Manuscript under review by AISTATS 2026
+E[D
+(k)
+b+1 | Fb] = E[ŷ
+(k)
+b+1 − ỹ∗
+k | Fb]
+= E
+h b
+b + 1
+ŷ
+(k)
+b +
+1
+b + 1
+(I −
+1
+n
+11⊤
+)Sb+1,(k)
+n (y − ΓM
+ X
+a̸=k
+ŷ
+(a)
+b
+
+) − ỹ∗
+k | Fb
+i
+=
+b
+b + 1
+ŷ
+(k)
+b +
+1
+b + 1
+(I −
+1
+n
+11⊤
+)E[Sb+1,(k)
+n | Fb](y − ΓM
+ X
+a̸=k
+ŷ
+(a)
+b
+
+) − ỹ∗
+k
+=
+b
+b + 1
+D
+(k)
+b +
+1
+b + 1
+
+(I −
+1
+n
+11⊤
+)E[Sb+1,(k)
+n | Fb](y − ΓM
+ X
+a̸=k
+ŷ
+(a)
+b
+
+) − ỹ∗
+k
+
+=
+b
+b + 1
+D
+(k)
+b +
+1
+b + 1
+(I −
+1
+n
+11⊤
+) E[S(b,k)
+n | Fb] − E[S(∞,k)
+n | Fb]
+
+(y −
+X
+a̸=k
+ỹ∗
+a)
++
+1
+b + 1
+(I −
+1
+n
+11⊤
+)E[S(b,k)
+n | Fb](
+X
+a̸=k
+ỹ∗
+a − ΓM
+ X
+a̸=k
+ŷ
+(a)
+b
+
+)
+=
+b
+b + 1
+D
+(k)
+b +
+1
+b + 1
+(I −
+1
+n
+11⊤
+)E[S(b,k)
+n | Fb](
+X
+a̸=k
+ỹ∗
+a − ΓM
+ X
+a̸=k
+ŷ
+(a)
+b
+
+)
+:=
+b
+b + 1
+D
+(k)
+b +
+1
+b + 1
+(I −
+1
+n
+11⊤
+)E[S(b,k)
+n | Fb]∆
+(−k)
+b
+where ∆
+(−k)
+b ≤
+P
+a̸=k D
+(a)
+b . Without truncation, stacking across all features yields
+E[Db+1 | Fb] =
+
+b
+b + 1
+Inp +
+1
+b + 1
+L
+
+Db,
+where L is the np × np block matrix with diagonal blocks equal to 0 and off–diagonal blocks given by ES(k)
+,
+multiplied by the averaging operator (I − 1
+n2 11⊤
+).
+The Partition Distinctness assumption implies that each off–diagonal block of L has operator norm at most c3,
+so by a Schur–type bound
+∥L∥ ≤ (p − 1)c3 < 1
+Consequently the stacked update satisfies
+∥E[Db+1 | Fb]∥ ≤
+b + ∥L∥
+b + 1
+∥Db∥
+For the deviation condition, if leaf predictions are bounded by M, then ∥ϵb+1∥ ≤
+2M
+√
+p
+b+1 , so supb ∥ϵb∥ → 0 and
+P
+b E[∥ϵb∥2
+] < ∞. This verifies the stochastic contraction mapping conditions.
+It remains to verify the convergence of the intercept term β̂. The update rule for the intercept is given by
+β̂b+1 := β̂b +
+1
+n
+p
+X
+k=1
+n
+X
+i=1
+f̂
+(k)
+b (xi)
+To identify this limit, recall that at the postulated fixed point we have
+ŷ∗
+= β̂
+∗
++
+p
+X
+k=1
+ỹ∗
+k,
+with 1
+n 1⊤
+ỹ∗
+k = 0 for all k. Taking the average over i gives
+1
+n
+1⊤
+ŷ∗
+= β̂
+∗
++
+1
+n
+p
+X
+k=1
+1⊤
+ỹ∗
+k = β̂
+∗
+.
+Manuscript under review by AISTATS 2026
+But 1
+n 1⊤
+ŷ∗
+= 1
+n 1⊤
+y = ȳ since the residuals at convergence have mean zero. Therefore the intercept converges
+almost surely to the global mean of the response,
+β̂b
+a.s.
+−→ ȳ =
+1
+n
+1⊤
+y.
+We drop the subscript n if no ambiguity is caused.
+Corollary B.1. By defining f̂(k)
+:= lim
+b→∞
+f̂
+(k)
+b , the feature-wise prediction:
+f̂(k)
+(x) = E[s(k)
+(x)]⊤
+(I − ES(k)
+)†
+(I −
+1
+n
+11⊤
+)
+h
+I − (I + Kn)†
+Kn
+i
+y
+and the ensemble prediction
+f̂(x) := ȳ +
+p
+X
+k=1
+E[s(k)
+(x)]⊤
+(I − ES(k)
+)†
+(I −
+1
+n
+11⊤
+)
+h
+I − (I + Kn)†
+Kn
+i
+y
+Intuitively, after centering each signal vector, we would have a decomposition with additive feature-shaped
+functionals plus a intercept, which is ȳ. If we plot the partial-dependency figure, we would see all predicted
+signal oscillating around 0. In that case, interpretation is as follow: If we observe no features, the best guess
+would be the baseline β̂
+∗
+= ȳ. As we adding more and more features, we are able to recover greater parts of the
+function landscape.
+C Limiting Distribution
+In Section B, we have shown that as we keep boosting, our feature estimators will converge to a stacked kernel-
+ridge-regression
+ŷ∗
+= β̂
+∗
++
+p
+X
+k=1
+f̂(k)
+(X) = ȳ + JnS(k)
+[I + JnK]−1
+y
+with
+K :=
+p
+X
+k=1
+ES(k)
+C.1 Preliminaries for Asymptotic Normality
+To show asymptotic normality, consider the following decomposition:
+b
+f
+(k)
+n (x) − f(k)
+(x)
+r(k)
+=
+b
+f
+(k)
+n (x) − ⟨r(k)
+(x), f(Xn)⟩
+r(k)
++
+⟨r(k)
+(x), f(Xn)⟩ − f(k)
+(x)
+r(k)
+(5)
+The first term can be easily shown by constraining leaf size, which we discuss in Section C.2. The later term is
+trickier. Generalizing from training set to the whole input space, we expect a convergence that is at least of a
+weak. Bounded kernel, fortunately, allows us to do so.
+Manuscript under review by AISTATS 2026
+C.2 Conditional Asymptotic Normality
+We begin analysis by showing asymptotic normality on the training set. Formally, denote f(X) =
+[f(x1), · · · , f(xn)]⊤
+. What we want to show is that, given any x ∈ Rp
+, ∀k:
+f̂(k)
+(x) − r(k)
+(x)⊤
+f(X)
+r(k)(x)
+d
+→ N(0, σ2
+)
+The key component of this proof is the rate of r(k)
+1
+, r(k)
+, r(k)
+∞
+. These rates will be built on a result
+shown in the original Boulevard paper on the behavior of subsampling rate.
+Lemma C.1. Considering a subsampled regression tree. Assume that each leaf contains no fewer than n
+1
+p+2
+sample points before subsampling. If we are subsampling at rate at least ξ = n− 1
+p+2 log n
+, then the expected
+structure vector’s norm follows the rate below:
+k(k)
+= 1 − O
+
+1
+n
+
+Our plan to conditional CLT is as follow: Lemma C.1 specifies a proper subsample rates that enables norm
+convergence. Lindeberg condition simply asks us to check the truncation level
+r
+(k)
+i
+∥r(k)
+∥
+. We will first study the
+norm of k(k)
+. To bound the ℓ1 norm, it suffices to imposing conditions on the leaf size (with respect to the
+Lebesgue measure of data points). To bound the ℓ2 norm. A simple algebra utilizing the rate of ℓ1 norm will
+help with that, too.If this norm is well controlled, notice that the Boulevard vector r(k)
+is simply a sum of rows
+in the matrix P := (I − K(k)
+)†
+(I − 1
+n 11⊤
+)
+h
+I − (I + K)†
+K
+i
+with the weighting vector being k(k)
+. Hence it suffices
+to study the eigenvalues of the operator P, which we discuss below.
+Lemma C.2 (Spectrum of K(k)
+). For any feature k, the expected structure matrix K(k)
+= E[S(k)
+] is a symmetric
+operator on Rn
+with spectrum contained in [0, 1]. It always holds that K(k)
+1 = 1, so 1 is an eigenvalue with
+eigenvector 1. Restricting to the mean–zero subspace H0 = {v : 1⊤
+v = 0}, the supremum of the spectrum is
+bounded by
+sup{λ : λ ∈ σ(K(k)
+|H0
+)} = ρk < 1,
+provided the distribution of partitions under Qk
+n is not almost surely degenerate.
+Proof. Fix any unit v ∈ H0. Because S(k)
+is an orthogonal projector, v⊤
+S(k)
+v = ∥S(k)
+v∥2
+, with equality
+∥S(k)
+v∥ = 1 if and only if v ∈ range(S(k)
+). Hence
+v⊤
+K(k)
+v = E
+h
+v⊤
+S(k)
+v
+i
+= E
+h
+∥S(k)
+v∥2
+i
+≤ 1.
+Assume toward a contradiction that λmax(K(k)
+|H0
+) = 1. Then there exists a sequence of unit vectors vm ∈ H0
+with v⊤
+mK(k)
+vm → 1. By the display, E[∥S(k)
+vm∥2
+] → 1. The map Π 7→ ∥S(k)
+vm∥2
+takes values in [0, 1], so
+if its expectation tends to 1, we must have ∥S(k)
+vm∥2
+→ 1 in probability (with respect to m). Passing to a
+subsequence if necessary and using compactness of the unit sphere, take vm → v⋆ with ∥v⋆∥ = 1 and v⋆ ∈ H0.
+By lower semicontinuity and the projector property, ∥S(k)
+v⋆∥ = 1 almost surely, hence S(k)
+v⋆ = v⋆ almost surely.
+Therefore v⋆ ∈ range(S(k)
+) for almost every draw of S(k)
+.
+If the distribution of S(k)
+charges at least two distinct partitions with positive probability, their ranges (as
+subspaces of Rn
+) intersect on H0 only in {0} unless v⋆ is proportional to 1, which it is not. Thus v⋆ cannot lie
+in the range of both with positive probability, a contradiction. Hence λmax(K(k)
+|H0
+) < 1.
+Lemma C.2 gives a strict bound on the eigenvalues of the expected kernel, which we can utilize to stabilize the
+behavior of the aggregated kernel K, which is described in the following lemma.
+Lemma C.3 (Aggregated kernel). Work on the mean–zero subspace H0 = {v ∈ Rn
+: 1⊤
+v = 0}. The aggregated
+kernel
+K :=
+p
+X
+k=1
+(I − K(k)
+)†
+
+I − 1
+n 11⊤
+
+K(k)
+Manuscript under review by AISTATS 2026
+is symmetric and positive semidefinite. Since
+
+I − 1
+n 11⊤
+
+is the identity on H0, we may write on H0 simply
+K =
+P
+k(I − K(k)
+)†
+K(k)
+. If ρk := ∥K(k)
+∥H0
+< 1, then on H0 one has the operator sandwich
+p
+X
+k=1
+K(k)
+⪯ K ⪯
+p
+X
+k=1
+1
+1 − ρk
+K(k)
+,
+hence λ+
+min(K) ≥ λ+
+min
+ P
+a K(k)
+
+and λmax(K) ≤
+P
+k
+ρk
+1−ρk
+.
+Proof. Each summand (I−K(k)
+)†
+K(k)
+is symmetric because K(k)
+is symmetric and (I−K(k)
+)†
+is a Borel function
+of K(k)
+; positivity follows from x 7→ (1 − x)†
+x being nonnegative on [0, 1). On H0, the eigenvalues of (I − K(k)
+)†
+lie in [1, 1/(1 − ρk)], so for any v ∈ H0,
+v⊤
+K(k)
+v ≤ v⊤
+(I − K(k)
+)†
+K(k)
+v ≤
+1
+1 − ρk
+v⊤
+K(k)
+v.
+Summing over k gives the stated Loewner bounds, from which the eigenvalue bounds follow.
+Combining those bounds above, we are able to claim that our EBM operator P will not explode in some directions.
+Formally, we have the following lemma.
+Lemma C.4 (Eigenvalues of P). Work on the mean–zero subspace H0 = {v ∈ Rn
+: 1⊤
+v = 0}. Define
+P := (I − K(k)
+)†
+
+I − 1
+n 11⊤
+h
+I − (I + K)†
+K
+i
+, K :=
+p
+X
+k=1
+(I − K(k)
+)†
+
+I − 1
+n 11⊤
+
+K(k)
+.
+On H0 the centering projector is the identity and (I + K)†
+= (I + K)−1
+, hence
+P = (I − K(k)
+)†
+(I + K)−1
+on H0.
+The matrix P is symmetric and positive semidefinite on H0. Writing ρk := ∥K(k)
+∥H0
+< 1, its eigenvalues lie in
+the interval
+1
+1 + λmax(K)
+≤ λ(P) ≤
+1
+(1 − ρk) 1 + λ+
+min(K)
+.
+In particular, ∥P∥ ≤ (1 − ρk) (1 + λ+
+min(K))
+−1
+≤ (1 − ρk)−1
+. If, in addition, K(k)
+and K commute on H0, then
+P is diagonalizable in a common eigenbasis and
+λi(P) =
+1
+1 − λi(K(k))
+·
+1
+1 + λi(K)
+, i = 1, . . . , n − 1.
+Proof. On H0 we have I − 1
+n 11⊤
+= I and
+I − (I + K)†
+K = I − (I + K)−1
+K = (I + K)−1
+,
+so P = (I − K(k)
+)†
+(I + K)−1
+on H0. Since K(k)
+and K are symmetric, by the spectral theorem we may write
+K(k)
+= UΛU⊤
+with Λ = diag(λi) and define (I−K(k)
+)†
+= U(I−Λ)†
+U⊤
+, where (1−λi)†
+= 1/(1−λi) if λi ̸= 1 and
+0 otherwise. Thus (I − K(k)
+)†
+is symmetric and positive semidefinite on H0, with eigenvalues in [1, (1 − ρk)−1
+].
+Likewise, K is symmetric positive semidefinite, so (I+K)−1
+is symmetric positive definite on H0, with eigenvalues
+in [1/(1 + λmax(K)), 1/(1 + λ+
+min(K))]. The product of symmetric positive semidefinite matrices has nonnegative
+spectrum; moreover, for any matrices A, B the extremal singular values satisfy smin(AB) ≥ smin(A)smin(B) and
+smax(AB) ≤ smax(A)smax(B). Applying these to A = (I−K(k)
+)†
+and B = (I+K)−1
+yields the stated eigenvalue
+interval and the norm bound. If K(k)
+and K commute, they are simultaneously diagonalizable on H0, and the
+eigenvalue formula follows by multiplying the diagonal entries.
+Then our analysis proceed with the assistance of the following theorem, cited from the original Boulevard paper
+as well.
+Manuscript under review by AISTATS 2026
+Lemma C.5 (Rate of Convergence). Let Bn := {i : ∥x − xi∥ ≤ dn} be the points within distance dn from test
+point x. If |Bn| = Ω(n · dd
+n), then k(k)
+2
+= Θ(n− 1
+2
+1
+d+1 ), r(k)
+2
+= Θ(n− 1
+2
+1
+d+1 ).
+This lemma holds true regardless of the design of our boosting process. The key argument is the minimal leaf
+size. A sketch of proof is appended below.
+Proof. To bound k(k)
+, recall:
+k
+(k)
+nj = E[s
+(k)
+n,j(x)] = E
+"
+1(xj ∈ A)
+Pn
+j=1 1(xj ∈ A)
+#
+, x ∈ A
+encodes the expected influence of point xj on a point of interest x among other n points. Then the condition
+inf
+A∈q∈Qn
+n
+X
+i=1
+1(xi ∈ A) ≥ Ω(n
+1
+d+1 )
+implies that k
+(k)
+nj = Øn− 1
+d+1 , since we can’t have total weights of more than O(1) in a leaf. By Lemma C.1,
+k(k)
+1
+≤ 1,
+k(k)
+≤
+q
+k(k)
+1
+k(k)
+∞
+= Øn− 1
+2
+1
+d+1 .
+By assetion |Bn| = Ω(n · dd
+n), there are at most
+Ω(n · dd
+n) = Ω(n
+1
+d+1 )
+knj’s that are positive. Equivalently, we can have the magnitude of each non-zero k
+(k)
+nj is lower bounded by
+Ω(n− 1
+d+1 ). This holds also because the total weights can’t be larger than O(1). Since k(k)
+1
+= 1 − O(n−1
+),
+k(k)
+= Ω(
+r
+n− 1
+d+1
+2
+· n
+1
+d+1 ) = Ω(n− 1
+2
+1
+d+1 ).
+By lemma C.4, we know that r(k)
+is a linear transformation from k(k)
+by P, where P has bounded eigenvalues.
+Hence r(k)
+enjoys similar rates.
+Having access to the rate of convergence of r(k)
+, we can fill in the blank of the weighting vector argument
+in the Lindeberg conditions. Concretely, it controls any error deviate too much from 0 that contributes to
+non-normality. We state the theorem below.
+Theorem C.1 (Conditional Asymptotic Normality). For any x ∈ [0, 1]p
+, write f(Xn) = (f(x1), . . . , f(xn))⊤
+.
+Then under SVI, Non-Adaptivity, Minimal Leaf Size and assumptions in Lemma C.5, we have
+b
+f
+(k)
+n (x) − ⟨r(k)
+(x), f(Xn)⟩
+r(k)
+d
+→ N(0, σ2
+).
+Proof. Write
+b
+f(x) − r(k)⊤
+f(X) = r(k)⊤
+⃗
+ϵn.
+To obtain a CLT we check the Lindeberg-Feller condition of r(k)⊤
+⃗
+ϵn, i.e. for any δ > 0,
+lim
+n
+1
+r(k) 2
+σ2
+n
+X
+i=1
+E
+h
+(r
+(k)
+i ϵi)2
+1(|r
+(k)
+i ϵi| > δ r(k)
+σ)
+i
+= 0.
+Since k(k)
+∞
+= O
+
+n− 1
+d+2
+
+and P has bounded row sums, we have
+r(k)
+∞
+≤ k(k)
+∞
+· ∥P∥1 = O
+
+n− 1
+d+1
+
+.
+Manuscript under review by AISTATS 2026
+Furthermore, since r(k)
+= Θ(n− 1
+2
+1
+d+1 ), we get
+r(k)
+∞
+r(k)
+= O
+
+n− 1
+2
+1
+d+1
+
+,
+This allows us to check out the Lindeberg-Feller conditions:
+n
+X
+i=1
+E
+h
+(r
+(k)
+i ϵi)2
+1(|r
+(k)
+i ϵi| > δ r(k)
+σ)
+i
+≤
+n
+X
+i=1
+r
+(k)
+i
+2
+q
+E[ϵ4
+i ] · E[1(|r
+(k)
+i ϵi| > δ r(k) σ)]
+≤
+n
+X
+i=1
+r
+(k)
+i
+2
+q
+E[ϵ4
+i ] ·
+v
+u
+u
+tP |ϵi| ≥
+δ∥r(k)∥σ
+r
+(k)
+i
+!
+≤
+n
+X
+i=1
+r
+(k)
+i
+2
+q
+E[ϵ4
+i ]
+v
+u
+u
+u
+t2 exp
+
+−
+1
+2σ2
+·
+δ∥r(k)∥σ
+r
+(k)
+i
+!2
+
+
+≤ r(k)
+2
+exp
+
+−O(n
+1
+d+1 )
+
+−→ 0
+Since ϵ is sub-Gaussian noise, the concentraion bound holds by definition of ϵ.
+C.3 Bias Control and Asymptotic Unbiasedness
+In Section C.2 we established a conditional central limit theorem: conditioning on the training covariates X, the
+noise contribution r(k)
+(x)⊤
+⃗
+ϵ is asymptotically normal with variance σ2
+. To extend this to an unconditional CLT
+for the estimator, it remains to verify that all bias terms arising from the random design vanish at rate op(1).
+Recall the decomposition
+ˆ
+f(k)
+(x) − f(k)
+(x(k)
+) = r(k)
+(x)⊤
+β + r(k)
+(x)⊤
+f(k)
+(X(k)
+) − f(k)
+(x(k)
+)
+
++ r(k)
+(x)⊤
+X
+a̸=k
+f(a)
+(X(a)
+) + r(k)
+(x)⊤
+⃗
+ϵ.
+The last term is the conditional CLT contribution. We now show that the three deterministic terms (baseline,
+same-feature, cross-feature) all converge to zero at suitable rates.
+Lemma C.6 (Baseline Bias). Let β ∈ Rn
+denote the baseline vector. Without subsampling, r(k)
+(x)⊤
+β = 0 for
+all k = 1, . . . , p.
+Proof. By definition,
+r(k)
+(x)⊤
+= k(k)
+(x)⊤
+(I − ES(k)
+)†
+(I − 1
+n 11⊤
+)
+
+I − (I + K)†
+K
+
+,
+where K =
+Pp
+k=1(I − ES(k)
+)†
+(I − 1
+n 11⊤
+)ES(k)
+. Since every structure matrix has row sum 1, the centering
+operator annihilates 1, so Kβ = 0 and likewise (I − 1
+n 11⊤
+)β = 0. Thus the entire product vanishes.
+The same feature term bias can be killed by building deeper trees as we collect more and more observations from
+the underlying data generating process. This can be realized by inheriting assumptions on leaf size from Zhou
+and Hooker (2019), which we present below:
+Remark 1. If subsampling is used, it suffices that the row sum of S(k)
+converges to 1 at rate o(1) so that
+r(k)
+(x)⊤
+β = op(1).
+Lemma C.7 (Same–feature Bias). Let f(k)
+be L–Lipschitz in its argument, and let An(x) denote the (feature-k)
+leaf containing x. Suppose the same–feature weights are local in the sense that r
+(k)
+n,i (x) = 0 whenever x
+(k)
+i /
+∈ An(x),
+and ∥r(k)
+(x)∥1 = Op(1). Then, writing ρn,k(x) := sup{|x
+(k)
+i − x(k)
+| : x
+(k)
+i ∈ An(x)}, we have
+r(k)
+(x)⊤
+f(k)
+(X(k)
+) − f(k)
+(x(k)
+) ≤ L ρn,k(x) ∥r(k)
+(x)∥1 = Op dn
+
+= Op n−1/(d+1)
+
+.
+In particular, this term is op(1).
+Manuscript under review by AISTATS 2026
+Proof. By the locality assumption,
+r(k)
+(x)⊤
+f(k)
+(X(k)
+) − f(k)
+(x(k)
+) =
+X
+i
+r
+(k)
+n,i (x) f(k)
+(x
+(k)
+i ) − f(k)
+(x(k)
+)
+
+≤ L
+X
+i: x
+(k)
+i ∈An(x)
+|r
+(k)
+n,i (x)| |x
+(k)
+i − x(k)
+|.
+The inner distances are bounded by ρn,k(x) ≤ diam(An(x)), so
+r(k)
+(x)⊤
+f(k)
+(X(k)
+) − f(k)
+(x(k)
+) ≤ L ρn,k(x)
+X
+i
+|r
+(k)
+n,i (x)| = L ρn,k(x) ∥r(k)
+(x)∥1.
+And since ∥r(k)
+(x)∥1 = Op(1), hence the product is Op(dn) = Op(n−1/(d+1)
+) = op(1).
+Thus the same-feature contribution is negligible whenever leaves shrink and the weight vector has bounded ℓ1
+norm.
+Lemma C.8 (Rate of Leakage). Under specified assumptions in section 3, the rate of the leakage term is
+|r(k)
+(x)⊤
+X
+a̸=k
+f(a)
+(X)| = O(n− 1
+d+1 log n) + O(
+1
+n
+) = o(1)
+Proof. We will make use of the radius factor ln = ⌈c1 log n⌉. The leakage term admits the decomposition
+r(k)
+(x)⊤
+X
+a̸=k
+f(a)
+(X) = r(k)
+(x)|⊤
+Dn
+X
+a̸=k
+f(a)
+(X) + r(k)
+(x)|⊤
+Dc
+n
+X
+a̸=k
+f(a)
+(X)
+Without loss of generality, we control the behavior of a single dimension a. First bound the near-by term
+r(k)
+(x)|⊤
+Dn
+f(a)
+(X). By assertion, the underlying additive terms are L-Lipschitz, which guarantees deterministi-
+cally the rate
+|r(k)
+(x)|⊤
+Dn
+f(a)
+(X)| ≤ L · lndn r(k)
+(x)|Dn
+1
+= O(dn log n) = O(n− 1
+d+1 log n) = o(1)
+Next, we show that the peripheral contribution also goes to 0. Recall by definition
+|r(k)
+(x)|⊤
+Dc
+n
+= k(k)
+(x)|⊤
+Dc
+n
+(I − ES(k)
+)−1
+(I − 1
+n 11⊤
+)
+
+I − (I + K)−1
+K
+
+f(a)
+(X(a)
+)
+By C.2, we know that I − K(k)
+op
+≤ 1
+1−ρk
+and I − 1
+n 11⊤
+op
+≤ 1. Hence the goal is to control the rate of the
+last linear transformation.
+Working on the centered subspace H0 = {v : v⊤
+1 ̸= 0}. We’ve shown that on the subspace H0 it holds true that
+[I − (I + K)−1
+K] = (I + K)−1
+. Combining the bound above, we consider the Neumann expansion of the kernel
+Manuscript under review by AISTATS 2026
+r(k)
+|Dc
+n
+=
+X
+|x−xi|>ln·dn
+|r
+(k)
+ni |
+=
+X
+|x−xi|>ln·dn
+|
+X
+j
+k
+(k)
+nj
+h
+(I − ES(k)
+)−1
+(I − 1
+n 11⊤
+)
+
+I − (I + K)−1
+K
+i
+j,i
+|
+≤ C ×
+X
+|x−xi|>ln·dn
+|
+X
+|x−xj |≤dn
+k
+(k)
+nj
+h
+I − (I + K)−1
+K
+i
+j,i
+|
+= C ×
+X
+|x−xj |>ln·dn
+|
+X
+|x−xj |≤dn
+k
+(k)
+nj
+h
+(I + K)−1
+i
+j,i
+|
+≤ C ×
+X
+|x−xj |>ln·dn
+k
+(k)
+nj
+X
+|x−xi|>ln·dn
+|
+h
+(I + K)−1
+i
+j,i
+|
+≤ C ×
+X
+|x−xj |>ln·dn
+k
+(k)
+nj
+X
+|xi−xj |>(ln−1)·dn
+|
+h
+(I + K)−1
+i
+j,i
+|
+By Lemma C.4, we know that I + K is positive semidefinite, has bounded inverse and has bounded spectrum
+from [1 + λmin(K), 1 + λmax(K)]. Hence by proposition D.1, the bound above proceeds as
+r(k)
+(x) Dc
+n 1
+≤ C
+X
+|x
+(k)
+j −x(k)|≤dn
+k
+(k)
+nj (x)
+X
+|x
+(k)
+i −x(k)|>ℓndn
+C0 q ℓn−1
+≤ O(n q ℓn−1
+)
+= O(q−1
+· n · qc1 log n
+)
+= O(q−1
+n1−c1 log q
+)
+where q =
+√
+(1+λmax(K))/((1+λmin(K))−1
+√
+(1+λmax(K))/((1+λmin(K))+1
+. Choose c1 = 2
+log q we have this contribution being O( 1
+n ) = o(1). And
+since f(k)
+(X(k)
+) are bounded for all k below M, hence the peripheral term is also of rate o(1). Adding the
+inner-rim term preserves the rate o(1).
+Collecting Lemmas C.6–C.8 and the we conclude that the random-design bias terms vanish in probability. To-
+gether with the conditional CLT for the noise term, Slutsky’s theorem implies the full estimator is asymptotically
+normal (formalized in the next subsection).
+C.4 Unconditional Asymptotic Normality
+In Section C.3, we have shown that all bias terms vanish to 0 deterministically, given the rate on k(k)
+and
+r(k)
+hold. However the rate does not come for free. To ensure such assumptions hold, we require our tree
+structure space to be restricted to support such rate. Formally, we introduce the lemma below.
+Lemma C.9. For given x ∈ [0, 1]d
+, suppose we have random sample (x1, y1), . . . , (xn, yn) for each n. If we
+restrict the cardinality of all univariate tree space Q
+(k)
+n using any small α > 0 s.t.
+|Q(k)
+n | = Ø
+1
+n
+exp
+
+1
+2
+n
+1
+d+2 −ν
+− nα
+
+,
+then
+f̂(k)
+(x) − r(k)
+(x)⊤
+f(X)
+]r(k)(x)
+d
+→ N(0, σ2
+ϵ ).
+Manuscript under review by AISTATS 2026
+Proof. The proof is similar to Zhou and Hooker (2019) and we direct the audience to the Lemma 4.3. The idea
+is that we’ve already shown in section C.2 that under the stated assumptions of |Bn| and the growing minimal
+number of points in tree, we will get the conditional clt for free. Hence the strategy is to show that those two
+assumptions are met almost surely. Here we simply replace the uniform tree space for the specialized tree space
+Q
+(k)
+n , k = 1, · · · , p.
+The sketch of proof is as follow. To show (i), we bound the tail probability of the cardiality of Bn being too
+large, i.e. P(|Bn| > an) for some growing an. This tail probability is bounded by multiplicative Chernoff bound
+and absolutely summable, which is then a.s. implied by Borel-Cantelli.
+As for (ii), we use the similar strategy. Notice that the probability of interest is
+P
+
+∃A ∈ Π ∈ Q(k)
+n s.t. inf
+A∈Π∈Q
+(k)
+n
+n
+X
+i=1
+I(xi,n ∈ A) > Cn
+1
+d+2
+
+for some C. The cardinality of Q
+(k)
+n comes in here to serve as a union bound. It can similarly be shown that this
+probability is also summable and hence (ii) holds a.s..
+Combining all results from section C.3, C.2, C.4.
+Theorem C.2. Under assumptions on tree space, and all assumptions from section 3, we have
+f̂(k)
+(x) − f(k)
+(x)
+r(k)(x)
+d
+→ N(0, σ2
+)
+for all k = 1, · · · , p.
+Proof. We break the numerator into three terms.
+f̂(k)
+(x) − f(k)
+(x)
+r(k)(x)
+=
+1
+r(k)(x)
+(r(k)
+(x)⊤
+β+ r(k)
+(x)⊤
+f(k)
+(X(k)
+)−f(k)
+(x(k)
+)
+
++r(k)
+(x)⊤
+X
+a̸=k
+f(a)
+(X(a)
+)+r(k)
+(x)⊤
+⃗
+ϵ)
+Under restricted tree space assumptions, all terms except the last term are op(1), and the last term is conditionally
+asymptotically normal. By Slutsky’s theorem, the sum has a limiting distribution being N(0, σ2
+).
+The CLT holds trivially for the baseline vector as well, by definition of the fixed point it converge to.
+Theorem C.3 (CLT for Baseline Vector). Let β̂ = 1
+n
+Pn
+i=1 yi denote the baseline estimator returned by Algo-
+rithm 1. Under Assumption 3, the random vector
+√
+n (β̂ − β) converges in distribution to a Gaussian:
+√
+n (β̂ − β)
+d
+−→ N(0, σ2
+),
+where β = E[Y ] is the population intercept.
+Proof. By construction of the algorithm, the intercept is always updated by the global mean of residuals. At
+convergence this coincides with the empirical mean of the responses:
+β̂ =
+1
+n
+n
+X
+i=1
+yi.
+Since yi = f(xi) + ϵi with E[ϵi] = 0 and Var(ϵi) = σ2
+< ∞, we have E[yi] = β. Because the {yi} are i.i.d.
+sub–Gaussian with finite variance, the Lindeberg–Feller central limit theorem applies, yielding
+√
+n (β̂ − β) =
+1
+√
+n
+n
+X
+i=1
+(yi − E[yi])
+d
+−→ N(0, σ2
+).
+Manuscript under review by AISTATS 2026
+D Stochastic Contraction Mapping Theorem
+Theorem D.1. Given Rd
+-valued stochastic process {zt}t∈N, a sequence of 0 < λt ≤ 1, define
+F0 = ∅, Ft = σ(z1, . . . , zt),
+ϵt = zt − E[zt|Ft−1].
+We call zt a stochastic contraction if the following properties hold
+1. Vanishing coefficients
+∞
+X
+t=1
+(1 − λt) = ∞, i.e.
+∞
+Y
+t=1
+λt = 0.
+2. Mean contraction
+||E[zt|Ft−1]|| ≤ λt ∥zt−1∥ , a.s..
+3. Bounded deviation
+sup ∥ϵt∥ → 0,
+∞
+X
+t=1
+E[∥ϵt∥
+2
+] < ∞.
+In particular, a multidimensional stochastic contraction exhibits the following behavior
+1. Contraction
+zt
+a.s.
+→ 0.
+2. Kolmogorov inequality
+P
+
+sup
+t≥T
+∥zt∥ ≤ ∥zT ∥ + δ
+
+≥ 1 −
+4
+√
+d
+P∞
+t=T +1 E[ϵ2
+t ]
+min{δ2, β2}
+(6)
+holds for all T, δ > 0 s.t. β = ∥zT ∥ + δ −
+√
+d supt>T ∥ϵt∥ > 0.
+Proposition D.1 (Demko–Moss–Smith, General Sparse Exponential Decay). Let A be positive definite, bounded,
+and boundedly invertible on ℓ2
+(S). For any such A, define the support sets
+Sn(A) :=
+n
+[
+k=0
+{(i, j) : (Ak
+)ij ̸= 0}, Dn(A) := (S × S) \ Sn(A).
+Then there exist constants C0 < ∞ and q ∈ (0, 1), depending only on the spectral bounds of A, such that
+sup{ |A−1
+(i, j)| : (i, j) ∈ Dn(A) } ≤ C0 q n+1
+.
+Here the decay factor q is given explicitly by
+q =
+√
+r − 1
+√
+r + 1
+, r =
+b
+a
+,
+where [a, b] is the smallest interval containing the spectrum of A.
+

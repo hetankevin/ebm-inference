@@ -189,17 +189,15 @@ def run_rep(rep, args, base_seed=0):
 
     estimator_kwargs = dict(
         max_rounds=args.rounds,
+        warmup_rounds=args.warmup_rounds,
         max_bins=args.n_bins,
+        max_bins_auto=args.max_bins_auto,
         subsample_rate=args.subsample_rate,
         truncation=args.truncation,
         random_state=base_seed + 1009 * rep,
         max_leaves=args.max_leaves,
         n_jobs=args.n_jobs,
-        outer_bags=args.outer_bags,
-        bin_level_inference=args.bin_level_inference,
-        use_nystrom=args.use_nystrom,
-        nystrom_rank=args.nystrom_rank,
-        nystrom_ridge=args.nystrom_ridge,
+        outer_bags=1,
         auto_bins_scheme=args.auto_bins_scheme,
     )
 
@@ -209,13 +207,11 @@ def run_rep(rep, args, base_seed=0):
 
     # Quick verification that we're using the correct implementation
     if rep == 0:  # Only debug first repetition
-        debug_space = None if args.inference_space == "auto" else args.inference_space
         lo, hi, _ = ebm.predict_intervals(
             Xte[:5],
             level=0.95,
             mode="prediction",
             sigma=1.0,
-            inference_space=debug_space,
         )
         print(f"Rep {rep}: PI widths with σ=1: {hi - lo}")
         if np.allclose(hi - lo, 0):
@@ -268,13 +264,14 @@ def run_rep(rep, args, base_seed=0):
         for r in curve_rounds:
             probe = InferableEBMRegressor(
                 max_rounds=int(r),
+                warmup_rounds=args.warmup_rounds,
                 max_bins=args.n_bins,
+                max_bins_auto=args.max_bins_auto,
                 n_jobs=args.n_jobs,
                 subsample_rate=args.subsample_rate,
-                outer_bags=args.outer_bags,
+                outer_bags=1,
                 truncation=args.truncation,
                 random_state=base_seed + 1009*rep,
-                bin_level_inference=args.bin_level_inference
             ).fit(Xtr, ytr)
             yhat_tr_probe = probe.predict(Xtr)
             yhat_cal_probe = probe.predict(Xcal)
@@ -315,8 +312,6 @@ def run_rep(rep, args, base_seed=0):
         sigma = float(np.std(resid, ddof=1)) if resid.size else 1e-8
     sigma = float(np.clip(sigma, 1e-8, 1e6))
 
-    inference_space = None if args.inference_space == "auto" else args.inference_space
-
     if args.calibrate_intervals:
         try:
             ebm.calibrate_intervals(
@@ -325,7 +320,6 @@ def run_rep(rep, args, base_seed=0):
                 level=args.level,
                 mode="prediction",
                 sigma=sigma,
-                inference_space=inference_space,
                 propagate_to_ci_ri=args.propagate_calibration,
             )
         except ValueError as exc:
@@ -335,21 +329,18 @@ def run_rep(rep, args, base_seed=0):
         level=args.level,
         mode="confidence",
         sigma=sigma,
-        inference_space=inference_space,
     )
     pi_l, pi_u, _ = ebm.predict_intervals(
         Xte,
         level=args.level,
         mode="prediction",
         sigma=sigma,
-        inference_space=inference_space,
     )
     ri_l, ri_u, _ = ebm.predict_intervals(
         Xte,
         level=args.level,
         mode="reproduction",
         sigma=sigma,
-        inference_space=inference_space,
     )
 
     # Paper-faithful coverage definitions
@@ -408,57 +399,35 @@ def run_rep(rep, args, base_seed=0):
 def main():
     np.seterr(over='ignore', invalid='ignore')  # avoid noisy warnings; we guard widths explicitly
     ap = argparse.ArgumentParser()
-    ap.add_argument("--n", type=int, default=1000)
+    ap.add_argument("--n", type=int, default=2000)
     ap.add_argument("--noise", type=float, default=1)
     ap.add_argument("--cal-frac", dest="cal_frac", type=float, default=0.1)
     ap.add_argument("--test-frac", dest="test_frac", type=float, default=0.2)
     ap.add_argument("--rounds", type=int, default=100)
-    ap.add_argument("--max-leaves", type=int, default=2)
+    ap.add_argument("--max-leaves", type=int, default=2**3)
     ap.add_argument("--n-bins", dest="n_bins", type=int, default=0)
-    inf_group = ap.add_mutually_exclusive_group()
-    inf_group.add_argument(
-        "--bin-level-inference",
-        dest="bin_level_inference",
-        action="store_true",
-        help="Build inference objects in bin space.",
-    )
-    inf_group.add_argument(
-        "--sample-level-inference",
-        dest="bin_level_inference",
-        action="store_false",
-        help="Force inference objects to operate in sample space.",
-    )
-    ap.set_defaults(bin_level_inference=True)
-    ap.add_argument(
-        "--inference-space",
-        choices=["auto", "samples", "bins"],
-        default="auto",
-        help="Space used when calling predict_intervals/importance (auto defers to model).",
-    )
-    ap.add_argument("--n-jobs", type=int, default=-2)
-    ap.add_argument("--outer-bags", type=int, default=14)
+    ap.add_argument("--max-bins-auto", dest="max_bins_auto", type=int, default=255)
+    ap.add_argument("--n-jobs", type=int, default=1)
     ap.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1)
+    ap.add_argument("--warmup-rounds", dest="warmup_rounds", type=float, default=0)
     ap.add_argument("--truncation", type=float, default=100.0)
     ap.add_argument("--reps", type=int, default=50)
     ap.add_argument("--level", type=float, default=0.95)
-    ap.add_argument("--use-nystrom", dest="use_nystrom", action="store_true")
-    ap.add_argument("--no-nystrom", dest="use_nystrom", action="store_false")
-    ap.set_defaults(use_nystrom=False)
-    ap.add_argument("--nystrom-rank", dest="nystrom_rank", type=int, default=64)
-    ap.add_argument("--nystrom-ridge", dest="nystrom_ridge", type=float, default=1e-6)
     ap.add_argument(
         "--auto-bins-scheme",
         choices=["quantile", "cube", "count"],
-        default="quantile",
+        default="cube",
         help="Automatic numeric binning policy (default: quantile).",
     )
     ap.add_argument(
         "--calibrate-intervals",
+        default=True,
         action="store_true",
         help="Calibrate prediction intervals on the validation split",
     )
     ap.add_argument(
         "--propagate-calibration",
+        default=False,
         action="store_true",
         help="Apply the prediction-interval calibration factor to confidence and reproduction intervals",
     )
@@ -478,6 +447,7 @@ def main():
     ap.add_argument(
         "--plot-combined",
         action="store_true",
+        default=True,
         dest='plot_combined',
         help="Combine model and point distributions into two rows when plotting.",
     )

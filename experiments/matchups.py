@@ -32,9 +32,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=200)
     ap.add_argument("--reps", type=int, default=5)
-    ap.add_argument("--use-nystrom", action="store_true")
-    ap.add_argument("--nystrom-rank", type=int, default=256)
-    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="matchups.csv")
     args = ap.parse_args()
 

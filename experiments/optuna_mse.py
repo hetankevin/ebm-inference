@@ -25,7 +25,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import KFold, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -134,7 +134,7 @@ def load_air_quality() -> Dataset:
             with zf.open("AirQualityUCI.csv") as zfile:
                 content = zfile.read()
                 csv_path.write_bytes(content)
-    df = pd.read_csv(csv_path, sep=";", decimal=",", na_values=[-500], encoding="latin-1", engine="python")
+    df = pd.read_csv(csv_path, sep=";", decimal=",", na_values=[-200], encoding="latin-1", engine="python")
     df = df.drop(columns=[col for col in df.columns if col.strip() == ""])  # drop empty column
     y = df.pop("CO(GT)")
     df = df.drop(columns=["Date", "Time"], errors="ignore")
@@ -213,7 +213,7 @@ def cross_val_score_neg_mse(
         preprocessor = _make_preprocessor(*column_groups)
         pipeline = Pipeline([("pre", preprocessor), ("model", model)])
     cv = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    scores = cross_val_score(pipeline, X, y, scoring="neg_mean_squared_error", cv=cv)
+    scores = cross_val_score(pipeline, X, y, scoring="neg_root_mean_squared_error", cv=cv)
     return scores.mean()
 
 
@@ -227,23 +227,17 @@ def tune_parameters(
     def objective(trial: Trial):
         if model_name == "RandomForest":
             params = {
-                "n_estimators": 500,
+                "n_estimators": 200,
                 "max_depth": trial.suggest_int("max_depth", 2, 8),
-                "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
-                "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 5),
-                "max_features": trial.suggest_categorical("max_features", ["log2", "sqrt", 0.5, 0.8]),
                 "random_state": args.seed,
                 "n_jobs": 1,
             }
             model = RandomForestRegressor(**params)
         elif model_name == "GradientBoosting":
             params = {
-                "n_estimators": 500,
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3
-                , log=True),
+                "n_estimators": 200,
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
                 "max_depth": trial.suggest_int("max_depth", 2, 8),
-                "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 4),
-                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "random_state": args.seed,
                 "n_jobs": 1,
             }
@@ -259,8 +253,9 @@ def tune_parameters(
         elif model_name == "EBM":
             params = {
                 "max_bins": trial.suggest_int("max_bins", 64, 256),
-                "max_rounds": 500,
-                "outer_bags": trial.suggest_int("outer_bags", 1, 4),
+                "max_rounds": 200,
+                'interactions' : 0.0,
+                "outer_bags": 1,
                 "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.02),
                 "random_state": args.seed,
                 'n_jobs' : 4
@@ -269,30 +264,26 @@ def tune_parameters(
         elif model_name == "InferableEBM":
             params = {
                 "max_bins_auto": trial.suggest_int("max_bins_auto", 64, 512),
-                "max_rounds": 500,
-                'warmup_rounds' : trial.suggest_int("warmup_rounds", 0, 500),
+                "max_rounds": 200,
+                'warmup_rounds' : trial.suggest_int("warmup_rounds", 0, 200),
                 "subsample_rate": trial.suggest_float("subsample_rate", 0.8, 1.0),
-                "truncation": trial.suggest_float("truncation", 10.0, 100.0),
+                "truncation": trial.suggest_float("truncation", 100.0, 10000.0),
                 "random_state": args.seed,
-                "bin_level_inference": args.bin_level_inference,
                 'n_jobs' : 1,
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-                'auto_bins_scheme': trial.suggest_categorical('auto_bins_scheme', ['count', 'cube']),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.8, log=True),
+                'auto_bins_scheme': trial.suggest_categorical('auto_bins_scheme', ['quantile', 'cube']),
                 "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 10.0, log=True),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 16),
-                'max_leaves' : trial.suggest_int('max_leaves', 2, 2**8)
+                'max_leaves' : trial.suggest_categorical('max_leaves', [2**i for i in range(1,8)])
             }
             model = InferableEBMRegressor(**params)
         elif model_name == "LightGBM":
             if lgb is None:
                 raise optuna.exceptions.TrialPruned()
             params = {
-                "n_estimators": 500,
+                "n_estimators": 200,
                 "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
                 "max_depth": trial.suggest_int("max_depth", 2, 8),
-                "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
-                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
                 "random_state": args.seed,
                 "n_jobs": 1,
                 'verbose' : -1
@@ -302,13 +293,9 @@ def tune_parameters(
             if xgb is None:
                 raise optuna.exceptions.TrialPruned()
             params = {
-                "n_estimators": 500,
+                "n_estimators": 200,
                 "eta": trial.suggest_float("eta", 0.01, 0.3, log=True),
                 "max_depth": trial.suggest_int("max_depth", 2, 8),
-                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-                "gamma": trial.suggest_float("gamma", 0.0, 5.0),
-                "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 10.0, log=True),
                 "random_state": args.seed,
                 "tree_method": "hist",
                 'n_jobs' : 1
@@ -349,13 +336,12 @@ def instantiate(model_name: str, params: Dict, ensemble_size: Optional[int], arg
         params.update({"max_iter": 10000, "random_state": args.seed})
         return ElasticNet(**params)
     if model_name == "EBM":
-        params.update({"max_rounds": ensemble_size, "random_state": args.seed, 'n_jobs' : 1})
+        params.update({"max_rounds": ensemble_size, "random_state": args.seed, 'n_jobs' : 4})
         return ExplainableBoostingRegressor(**params)
     if model_name == "InferableEBM":
         params.update({
             "max_rounds": ensemble_size,
             "random_state": args.seed,
-            "bin_level_inference": args.bin_level_inference,
             'n_jobs' : 1,
         })
         return InferableEBMRegressor(**params)
@@ -388,7 +374,7 @@ def _evaluate_model_curve(
     args_ns = SimpleNamespace(**args_dict)
     mses: List[float] = []
     last_mse: Optional[float] = None
-    for size in ensemble_sizes:
+    for size in tqdm(ensemble_sizes):
         if model_name == "ElasticNet" and last_mse is not None:
             mses.append(last_mse)
             continue
@@ -400,7 +386,7 @@ def _evaluate_model_curve(
             pipeline = Pipeline([("pre", preprocessor), ("model", model)])
         pipeline.fit(X_train, y_train)
         preds = pipeline.predict(X_test)
-        last_mse = mean_squared_error(y_test, preds)
+        last_mse = root_mean_squared_error(y_test, preds)
         mses.append(last_mse)
     return dataset_name, model_name, mses
 
@@ -431,14 +417,15 @@ def plot_results(dataset_name: str, ensemble_sizes: List[int], mse_curves: Dict[
     ax.set_xscale("linear")
     ax.set_yscale("log")
     ax.set_xlabel("Ensemble Size")
-    ax.set_ylabel("MSE")
+    ax.set_ylabel("RMSE")
     ax.set_title(dataset_name)
     ax.grid(True, linestyle="--", alpha=0.5)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--datasets", nargs="*", default=["wine", "obesity", "air"], choices=list(DATASET_LOADERS.keys()))
+    #"wine", "obesity", "air"
+    parser.add_argument("--datasets", nargs="*", default=["obesity"], choices=list(DATASET_LOADERS.keys()))
     parser.add_argument("--n-trials", type=int, default=100)
     parser.add_argument("--timeout", type=int, default=None, help="Optional timeout per model (seconds)")
     parser.add_argument("--seed", type=int, default=0)
@@ -448,14 +435,13 @@ def main():
         type=int,
         nargs="*",
         default=None,
-        help="Explicit ensemble sizes to evaluate (default: 50 100 500)",
+        help="Explicit ensemble sizes to evaluate (default: 50 100 200)",
     )
-    parser.add_argument("--ensemble-start", type=int, default=None)
-    parser.add_argument("--ensemble-stop", type=int, default=None)
-    parser.add_argument("--ensemble-step", type=int, default=None)
+    parser.add_argument("--ensemble-start", type=int, default=50)
+    parser.add_argument("--ensemble-stop", type=int, default=300)
+    parser.add_argument("--ensemble-step", type=int, default=50)
     parser.add_argument("--plot", type=str, default="plots/optuna_mse.png")
     parser.add_argument("--show", action="store_true")
-    parser.add_argument("--bin-level-inference", default=True, action="store_true")
     cpu_total = os.cpu_count() or 1
     parser.add_argument(
         "--workers",
@@ -465,8 +451,7 @@ def main():
     )
     args = parser.parse_args()
 
-    default_ensemble_sizes = [20, 30, 40, 50, 60, 70, 80, 90, 100, 
-                        110, 120, 130, 140, 150, 160, 170, 180, 190, 500]
+    default_ensemble_sizes = np.arange(50,500,50)
     if args.ensemble_sizes:
         ensemble_sizes = sorted(set(args.ensemble_sizes))
     elif any(value is not None for value in (args.ensemble_start, args.ensemble_stop, args.ensemble_step)):
@@ -494,6 +479,7 @@ def main():
             base_models.append("LightGBM")
         if xgb is not None:
             base_models.append("XGBoost")
+        base_models=['InferableEBM', 'ElasticNet']
         dataset_infos.append(
             SimpleNamespace(
                 name=dataset.name,

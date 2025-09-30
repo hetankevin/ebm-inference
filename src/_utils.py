@@ -582,10 +582,10 @@ def _auto_bins_for_numeric(
     """Auto bin count for numeric features."""
 
     scheme = (scheme or "quantile").lower()
-    if scheme in {"quantile", "cube", "cuberoot", "cubert"}:
+    if scheme in {"cube", "cuberoot", "cubert"}:
         nb = int(2 * round(n ** (1.0 / 3.0)))
         nb = max(min_bins_auto, min(max_bins_auto - 3, nb))
-    elif scheme == "count":
+    elif scheme in {"quantile", "count"}:
         nb = max(min_bins_auto, min(max_bins_auto - 3, n))
     else:
         raise ValueError(f"Unknown auto binning scheme '{scheme}'")
