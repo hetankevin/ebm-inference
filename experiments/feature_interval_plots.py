@@ -38,41 +38,52 @@ def friedman_true_function(X: np.ndarray) -> np.ndarray:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--n", type=int, default=1000, help="Number of training samples")
-    parser.add_argument("--noise", type=float, default=2, help="Standard deviation of Gaussian noise")
+    parser.add_argument("--n", type=int, default=1000, help="Number of simulated samples")
+    parser.add_argument("--noise", type=float, default=5.0, help="Standard deviation of Gaussian noise")
+    parser.add_argument("--cal-frac", dest="cal_frac", type=float, default=0.2, help="Fraction of data reserved for calibration when enabled")
     parser.add_argument("--level", type=float, default=0.95, help="Two-sided coverage level")
-    parser.add_argument("--mode", choices=["confidence", "prediction", "reproduction"], default="confidence")
-    parser.add_argument("--n-points", type=int, default=200, help="Grid size per feature")
-    parser.add_argument("--max-rounds", type=int, default=100)
-    parser.add_argument("--n-bins", type=int, default=0)
-    parser.add_argument("--max-leaves", type=int, default=2)
+    parser.add_argument("--mode", choices=["confidence", "prediction", "reproduction"], default="confidence", help="Interval family to visualise")
+    parser.add_argument("--n-points", type=int, default=500, help="Grid size per feature")
+    parser.add_argument("--rounds", "--max-rounds", dest="rounds", type=int, default=200, help="Boosting rounds")
+    parser.add_argument("--warmup-rounds", dest="warmup_rounds", type=int, default=0, help="Boulevard warmup rounds")
+    parser.add_argument("--min-samples-leaf", dest="min_samples_leaf", type=int, default=16, help="Minimum samples per leaf")
+    parser.add_argument("--n-bins", dest="n_bins", type=int, default=0, help="Fixed maximum number of bins per feature (0 = auto)")
+    parser.add_argument("--max-bins-auto", dest="max_bins_auto", type=int, default=255, help="Upper bound for adaptive binning")
+    parser.add_argument("--max-leaves", type=int, default=2**4, help="Maximum tree leaves per boosting step")
+    parser.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1.0, help="Row subsampling rate per round")
+    parser.add_argument("--truncation", type=float, default=100.0, help="Post-update truncation radius")
+    parser.add_argument("--n-jobs", dest="n_jobs", type=int, default=1, help="Parallel jobs for boosting")
+    parser.add_argument("--reg-lambda", dest="reg_lambda", type=float, default=10, help="L2 regularisation strength")
+    parser.add_argument("--leave-one-out", type=bool, default=False, help="Enable leave-one-out adjustments inside boosting")
     parser.add_argument("--calibrate-intervals", action="store_true", help="Calibrate prediction intervals on a validation split")
     parser.add_argument(
         "--propagate-calibration",
         action="store_true",
+        default=False,
         help="Apply the prediction-interval calibration factor to confidence and reproduction intervals",
     )
     parser.add_argument(
         "--auto-bins-scheme",
         choices=["quantile", "cube", "count"],
         default="quantile",
-        help="Automatic numeric binning policy (default: quantile)",
+        help="Automatic numeric binning policy",
     )
-    parser.add_argument("--output", type=str, default="plots/feature_interval_plots.png", help="Output figure path")
-    parser.add_argument("--show", action="store_true", help="Display the plot interactively")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--output", "--plot", "--out", dest="output", type=str, default="plots/feature_interval_plots.png", help="Output figure path")
+    parser.add_argument("--show", "--plot-show", default=True, dest="show", action="store_true", help="Display the plot interactively")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(args.seed)
     X, f_true = make_friedman(args.n, rng)
     y = f_true + rng.normal(scale=args.noise, size=args.n)
 
-    if args.calibrate_intervals and args.n > 1:
+    if args.calibrate_intervals and args.n > 1 and 0.0 < args.cal_frac < 1.0:
         perm = rng.permutation(args.n)
-        n_cal = max(1, int(0.2 * args.n))
+        n_cal = max(1, int(args.cal_frac * args.n))
         cal_idx = perm[:n_cal]
         train_idx = perm[n_cal:]
         X_cal = X[cal_idx]
@@ -85,13 +96,19 @@ def main() -> None:
         y_cal = None
 
     model = InferableEBMRegressor(
-        max_rounds=args.max_rounds,
+        max_rounds=args.rounds,
+        min_samples_leaf=args.min_samples_leaf,
         max_bins=args.n_bins,
-        subsample_rate=1.0,
-        truncation=3.0,
-        random_state=0,
+        max_bins_auto=args.max_bins_auto,
+        subsample_rate=args.subsample_rate,
+        truncation=args.truncation,
+        reg_lambda=args.reg_lambda,
+        random_state=args.seed,
         max_leaves=args.max_leaves,
+        leave_one_out=args.leave_one_out,
+        warmup_rounds=args.warmup_rounds,
         auto_bins_scheme=args.auto_bins_scheme,
+        n_jobs=args.n_jobs,
     )
     model.fit(X_train, y_train)
     print('Model fitted')

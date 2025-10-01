@@ -65,12 +65,13 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         parser.add_argument("--level", type=float, default=0.95, help="Two-sided coverage level")
         parser.add_argument("--max-rounds", type=int, default=100)
         parser.add_argument("--max-bins", type=int, default=0)
-        parser.add_argument("--max-leaves", type=int, default=2**4)
-        parser.add_argument("--learning-rate", type=int, default=1.)
+        parser.add_argument("--max-leaves", type=int, default=2**5)
+        parser.add_argument("--learning-rate", type=int, default=1)
         parser.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1.)
         parser.add_argument("--truncation", type=float, default=100.0)
         parser.add_argument("--warmup-rounds", type=int, default=0)
         parser.add_argument("--seed", type=int, default=0)
+        parser.add_argument("--leave-one-out", type=bool, default=False)
         parser.add_argument("--calibrate-intervals", default=True, action="store_true", help="Calibrate prediction intervals on a validation split")
         parser.add_argument(
             "--propagate-calibration",
@@ -115,9 +116,11 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         warmup_rounds = args.warmup_rounds,
         learning_rate = args.learning_rate,
         subsample_rate=args.subsample_rate,
+        leave_one_out = args.leave_one_out,
         truncation=args.truncation,
         random_state=args.seed,
         auto_bins_scheme=args.auto_bins_scheme,
+        n_jobs=-2,
     )
     estimator.fit(x_train, y_train)
 
@@ -194,10 +197,12 @@ def main(args: Optional[argparse.Namespace] = None) -> None:
         max_leaves = args.max_leaves,
         warmup_rounds = args.warmup_rounds,
         learning_rate = args.learning_rate,
+        leave_one_out = args.leave_one_out,
         subsample_rate=args.subsample_rate,
         truncation=args.truncation,
         random_state=args.seed,
         auto_bins_scheme=args.auto_bins_scheme,
+        n_jobs=-2,
     )
     estimator_retrain.fit(x_new, y_new)
     preds_retrain_eval = estimator_retrain.predict(X_eval)

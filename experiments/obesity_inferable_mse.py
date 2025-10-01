@@ -25,6 +25,8 @@ from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
 
+EFFECT_INTERVAL_LEVEL = 0.95
+
 
 # Ensure repository root is on sys.path for local inferable_ebm_regressor module
 _ROOT = Path(__file__).resolve().parents[1]
@@ -74,12 +76,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-rounds", type=int, default=200)
     p.add_argument("--min-samples-leaf", type=int, default=16)
     p.add_argument("--reg-lambda", type=float, default=100)
-    p.add_argument("--max-leaves", type=int, default=2**3)
-    p.add_argument("--subsample-rate", type=float, default=1.0)
+    p.add_argument("--max-leaves", type=int, default=6)
+    p.add_argument("--subsample-rate", type=float, default=1)
+    p.add_argument("--leave-one-out", type=bool, default=False)
     p.add_argument("--truncation", type=float, default=10.0)
     p.add_argument("--warmup-rounds", type=int, default=0)
     p.add_argument("--max-bins-auto", type=int, default=255)
-    # Trial 52 finished with value: -4.512131367048317 and parameters: {'max_bins_auto': 215, 'warmup_rounds': 147, 'subsample_rate': 0.8406321182831353, 'truncation': 498.50397016934403, 'learning_rate': 0.43953244400952857, 'auto_bins_scheme': 'cube', 'reg_lambda': 0.05509907280614087, 'min_samples_leaf': 15, 'max_leaves': 16}. Best is trial 52 with value: -4.512131367048317.
     p.add_argument(
         "--auto-bins-scheme",
         type=str,
@@ -92,6 +94,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Effect comparison / plotting
     p.add_argument("--compare-effects", default=True, action="store_true", help="Also fit EBM and save overlaid feature effects plot")
     p.add_argument("--effects-plot", type=Path, default=_ROOT / "plots" / "obesity_feature_effects.png")
+    p.add_argument("--predict-feature-intervals", type=bool, default=True)
     return p
 
 
@@ -119,6 +122,7 @@ def main() -> None:
         auto_bins_scheme=args.auto_bins_scheme,
         n_jobs=args.n_jobs,
         random_state=args.seed,
+        leave_one_out=args.leave_one_out,
     )
 
     # Fit and evaluate InferableEBM
@@ -131,6 +135,7 @@ def main() -> None:
     ebm_std = ExplainableBoostingRegressor(
         max_rounds=args.max_rounds,
         outer_bags=4,
+        interactions=0.0,
         random_state=args.seed,
         n_jobs=1,
     )
@@ -189,15 +194,34 @@ def compare_feature_effects(
         ebm.fit(X_train, y_train)
 
     n_features = X_train.shape[1]
-    n_cols = min(4, n_features)
-    n_rows = int(np.ceil(n_features / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.8 * n_cols, 3.2 * n_rows), squeeze=False, constrained_layout=True)
-
     baseline = _baseline_row(X_train)
-    for j, col in enumerate(X_train.columns):
-        r, c = divmod(j, n_cols)
-        ax = axes[r][c]
+    inferable_interval_fn = getattr(inferable, "predict_feature_intervals", None)
+    ebm_interval_fn = getattr(ebm, "predict_feature_intervals", None)
+    labels_map = {
+        "Gender": "Gender",
+        "Age": "Age",
+        "Height": "Height",
+        "family_history_with_overweight": "Family History of Being Overweight",
+        "FAVC": "Frequent High Calorie Food Intake",
+        "FCVC": "Frequent Consumption of Vegetables",
+        "NCP": "Number of Daily Meals",
+        "CAEC": "Food Between Meals",
+        "SMOKE": "Smoker",
+        "CH2O": "Water Intake",
+        "SCC": "Calorie Monitoring",
+        "FAF": "Physical Activity Frequency",
+        "TUE": "Time Using Technology",
+        "CALC": "Alcohol Intake",
+        "MTRANS": "Method of Transportation",
+        "NObeyesdad": "Obesity Level",
+    }
+
+    def _pretty_label(col: str) -> str:
+        return labels_map.get(col, col.replace("_", " ").title())
+
+    def _plot_single(ax, col: str) -> None:
         s = X_train[col]
+        feat_idx = X_train.columns.get_loc(col)
         if pd.api.types.is_numeric_dtype(s):
             grid = _numeric_grid(s)
             Xg = pd.DataFrame([baseline.values] * len(grid), columns=baseline.index)
@@ -206,9 +230,42 @@ def compare_feature_effects(
             y_ebm = ebm.predict(Xg)
             y_ie = y_ie - float(np.mean(y_ie))
             y_ebm = y_ebm - float(np.mean(y_ebm))
-            ax.plot(grid, y_ie, label="InferableEBM", linewidth=1.8)
-            ax.plot(grid, y_ebm, label="EBM", linewidth=1.8, linestyle="--")
-            ax.set_xlabel(col)
+            (line_ie,) = ax.plot(grid, y_ie, label="InferableEBM", linewidth=1.8)
+            (line_ebm,) = ax.plot(grid, y_ebm, label="EBM", linewidth=1.8, linestyle="--")
+            if inferable_interval_fn is not None:
+                try:
+                    ci_l, ci_u, ci_pred = inferable_interval_fn(
+                        feat_idx,
+                        grid,
+                        level=EFFECT_INTERVAL_LEVEL,
+                        mode="confidence",
+                        include_intercept=False,
+                    )
+                except Exception as exc:
+                    print(exc)
+                else:
+                    ci_pred = np.asarray(ci_pred, dtype=float)
+                    offset = float(np.mean(ci_pred))
+                    ci_l_center = np.asarray(ci_l, dtype=float) - offset
+                    ci_u_center = np.asarray(ci_u, dtype=float) - offset
+                    ax.fill_between(grid, ci_l_center, ci_u_center, color=line_ie.get_color(), alpha=0.3)
+            if ebm_interval_fn is not None:
+                try:
+                    ebm_ci_l, ebm_ci_u, ebm_ci_pred = ebm_interval_fn(
+                        feat_idx,
+                        grid,
+                        level=EFFECT_INTERVAL_LEVEL,
+                        mode="confidence",
+                        include_intercept=False,
+                    )
+                except Exception as exc:
+                    print(exc)
+                else:
+                    ebm_ci_pred = np.asarray(ebm_ci_pred, dtype=float)
+                    offset_std = float(np.mean(ebm_ci_pred))
+                    ebm_ci_l_center = np.asarray(ebm_ci_l, dtype=float) - offset_std
+                    ebm_ci_u_center = np.asarray(ebm_ci_u, dtype=float) - offset_std
+                    ax.fill_between(grid, ebm_ci_l_center, ebm_ci_u_center, color=line_ebm.get_color(), alpha=0.3)
         else:
             cats = s.dropna().unique().tolist()
             try:
@@ -216,8 +273,8 @@ def compare_feature_effects(
             except Exception:
                 pass
             if not cats:
-                ax.axis('off')
-                continue
+                ax.axis("off")
+                return
             Xg = pd.DataFrame([baseline.values] * len(cats), columns=baseline.index)
             Xg[col] = cats
             y_ie = inferable.predict(Xg)
@@ -225,25 +282,84 @@ def compare_feature_effects(
             y_ie = y_ie - float(np.mean(y_ie))
             y_ebm = y_ebm - float(np.mean(y_ebm))
             xs = np.arange(len(cats))
-            ax.plot(xs, y_ie, marker='o', label="InferableEBM", linewidth=1.8)
-            ax.plot(xs, y_ebm, marker='s', label="EBM", linewidth=1.8, linestyle="--")
+            (line_ie,) = ax.plot(xs, y_ie, marker="o", label="InferableEBM", linewidth=1.8)
+            (line_ebm,) = ax.plot(xs, y_ebm, marker="s", label="EBM", linewidth=1.8, linestyle="--")
+            if inferable_interval_fn is not None:
+                try:
+                    ci_l, ci_u, ci_pred = inferable_interval_fn(
+                        feat_idx,
+                        cats,
+                        level=EFFECT_INTERVAL_LEVEL,
+                        mode="confidence",
+                        include_intercept=False,
+                    )
+                except Exception as exc:
+                    print(exc)
+                else:
+                    ci_pred = np.asarray(ci_pred, dtype=float)
+                    offset = float(np.mean(ci_pred))
+                    ci_l_center = np.asarray(ci_l, dtype=float) - offset
+                    ci_u_center = np.asarray(ci_u, dtype=float) - offset
+                    ax.fill_between(xs, ci_l_center, ci_u_center, color=line_ie.get_color(), alpha=0.3)
+            if ebm_interval_fn is not None:
+                try:
+                    ebm_ci_l, ebm_ci_u, ebm_ci_pred = ebm_interval_fn(
+                        feat_idx,
+                        cats,
+                        level=EFFECT_INTERVAL_LEVEL,
+                        mode="confidence",
+                        include_intercept=False,
+                    )
+                except Exception as exc:
+                    print(exc)
+                else:
+                    ebm_ci_pred = np.asarray(ebm_ci_pred, dtype=float)
+                    offset_std = float(np.mean(ebm_ci_pred))
+                    ebm_ci_l_center = np.asarray(ebm_ci_l, dtype=float) - offset_std
+                    ebm_ci_u_center = np.asarray(ebm_ci_u, dtype=float) - offset_std
+                    ax.fill_between(xs, ebm_ci_l_center, ebm_ci_u_center, color=line_ebm.get_color(), alpha=0.3)
             ax.set_xticks(xs)
-            ax.set_xticklabels([str(x) for x in cats], rotation=30, ha='right')
-            ax.set_xlabel(col)
+            ax.set_xticklabels([str(x) for x in cats], rotation=30, ha="right")
+        ax.set_xlabel(_pretty_label(col))
+        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
 
-        if r == 0 and c == 0:
-            ax.legend(loc="best")
-        ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.7)
+    def _render_grid(columns: list[str], n_cols: int, output_path: Path) -> None:
+        if not columns:
+            return
+        n_cols = max(1, min(n_cols, len(columns)))
+        n_rows = int(np.ceil(len(columns) / n_cols))
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(4.8 * n_cols, 3.2 * n_rows),
+            squeeze=False,
+            constrained_layout=True,
+        )
+        for idx, col in enumerate(columns):
+            r, c = divmod(idx, n_cols)
+            ax = axes[r][c]
+            _plot_single(ax, col)
+            if idx == 0:
+                ax.legend(loc="best")
+        for idx in range(len(columns), n_rows * n_cols):
+            r, c = divmod(idx, n_cols)
+            fig.delaxes(axes[r][c])
+        for r in range(n_rows):
+            axes[r][0].set_ylabel("Effect on Weight")
+        plt.tight_layout()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=300)
+        plt.close(fig)
 
-    # Hide any unused axes
-    for k in range(n_features, n_rows * n_cols):
-        r, c = divmod(k, n_cols)
-        fig.delaxes(axes[r][c])
+    print(X_train.columns)
+    feature_list = list(X_train.columns)
+    _render_grid(feature_list, min(4, n_features) or 1, effects_path)
 
-    axes[0][0].set_ylabel("Centered effect")
-    effects_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(effects_path, dpi=300)
-    plt.close(fig)
+    wide_features = ["TUE", "FCVC", "NCP", "FAF"]
+    wide_features = [col for col in wide_features if col in X_train.columns]
+    if wide_features:
+        wide_path = effects_path.parent / "obesity_feature_effects_wide.png"
+        _render_grid(wide_features, len(wide_features), wide_path)
 
 
 if __name__ == "__main__":

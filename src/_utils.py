@@ -13,8 +13,9 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from ... import develop
-from ...utils._native import Native
+from ...utils._native import Native, Booster
 from ...utils._purify import purify
+
 from ._tensor import restore_missing_value_zeros
 
 _log = logging.getLogger(__name__)
@@ -715,3 +716,181 @@ def _post_fit_recenter(intercept: float, term_scores: List[np.ndarray],
                     new_intercept += avg_k
     
     return new_intercept
+
+
+
+
+def empirical_coverage(c: float, y_true: np.ndarray, y_pred: np.ndarray, widths: np.ndarray) -> float:
+    """Fraction of observations covered by ``y_pred ± c * widths``."""
+
+    lower = y_pred - c * widths
+    upper = y_pred + c * widths
+    return float(np.mean((y_true >= lower) & (y_true <= upper)))
+
+
+def find_min_scale(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    widths: np.ndarray,
+    target: float = 0.95,
+    tol: float = 1e-3,
+    c_max: float = 50.0,
+    max_iters: int = 50,
+) -> float:
+    """Binary-search the smallest scale reaching the desired empirical coverage."""
+
+    lo, hi = 0.0, float(c_max)
+    if empirical_coverage(hi, y_true, y_pred, widths) < target:
+        raise ValueError(f"c_max={c_max} too small; increase it.")
+
+    for _ in range(max_iters):
+        mid = 0.5 * (lo + hi)
+        if empirical_coverage(mid, y_true, y_pred, widths) >= target:
+            hi = mid
+        else:
+            lo = mid
+        if hi - lo < tol:
+            break
+    return hi
+
+
+def _parallel_update_feature(
+    feat_idx: int,
+    mask: np.ndarray,
+    dataset: np.ndarray,
+    preds_previous: np.ndarray,
+    term_scores_feat: np.ndarray,
+    train_bins_feat: np.ndarray,
+    warm_scores_feat: np.ndarray,
+    avg_scores_feat: np.ndarray,
+    bin_counts_feat: np.ndarray,
+    structure_template: np.ndarray,
+    n_samples: int,
+    truncation: float,
+    learning_rate: float,
+    warmup_rounds: int,
+    round_idx: int,
+    coeff: float,
+    n_float: float,
+    max_leaves: int,
+    min_leaf: int,
+    min_hessian: float,
+    reg_alpha: float,
+    reg_lambda: float,
+    max_delta_step: float,
+    min_cat_samples: int,
+    cat_smooth: float,
+    term_boost_flags_local: int,
+    leave_one_out: bool,
+) -> tuple[int, np.ndarray, np.ndarray, float, Optional[np.ndarray], int]:
+    """Run a single boosting update for one feature.
+
+    The helper is designed to be picklable so it can be executed inside joblib's
+    ``loky`` backend without relying on closures that capture non-picklable state.
+    It returns the updated warm/average score components together with the
+    contribution to the structure statistics used by inference.
+    """
+
+    native = Native.get_native_singleton()
+
+    bag = np.zeros(n_samples, dtype=np.int8)
+    bag[mask] = 1
+    init_scores_subset = preds_previous[mask].astype(np.float64, copy=True)
+    if leave_one_out:
+        term_scores_per_sample = term_scores_feat[train_bins_feat]
+        init_scores_subset -= term_scores_per_sample[mask]
+    intercept_arr = np.array([0.0], dtype=np.float64)
+
+    with Booster(
+        dataset,
+        intercept_arr,
+        bag,
+        init_scores_subset,
+        [(0,)],
+        0,
+        None,
+        Native.CreateBoosterFlags_Default,
+        "rmse",
+        develop.get_option("acceleration"),
+        None,
+    ) as booster:
+        booster.generate_term_update(
+            None,
+            term_idx=0,
+            term_boost_flags=term_boost_flags_local,
+            learning_rate=1,
+            min_samples_leaf=min_leaf,
+            min_hessian=min_hessian,
+            reg_alpha=reg_alpha,
+            reg_lambda=reg_lambda,
+            max_delta_step=max_delta_step,
+            min_cat_samples=min_cat_samples,
+            cat_smooth=cat_smooth,
+            max_cat_threshold=0,
+            cat_include=1.0,
+            max_leaves=max_leaves,
+            monotone_constraints=None,
+        )
+        splits_per_dim = booster.get_term_update_splits()
+        update_bins = booster.get_term_update()
+
+    update_bins = np.asarray(update_bins, dtype=float)
+
+    n_bins_feat = update_bins.shape[0]
+    structure_delta = None
+    update_count_inc = 0
+    if n_bins_feat > 0:
+        if splits_per_dim and len(splits_per_dim) > 0:
+            split_values = np.asarray(splits_per_dim[0], dtype=np.int64)
+        else:
+            split_values = np.empty(0, dtype=np.int64)
+
+        if split_values.size:
+            split_values = np.clip(split_values, 0, n_bins_feat)
+            split_values = np.unique(split_values)
+
+        boundaries = np.empty(split_values.size + 2, dtype=np.int64)
+        boundaries[0] = 0
+        if split_values.size:
+            boundaries[1:-1] = split_values
+        boundaries[-1] = n_bins_feat
+
+        structure_delta = np.zeros_like(structure_template, dtype=float)
+        for start, stop in zip(boundaries[:-1], boundaries[1:]):
+            if stop <= start:
+                continue
+            leaf_bins = np.arange(start, stop, dtype=np.int64)
+            leaf_size = leaf_bins.size
+            if leaf_size == 0:
+                continue
+            leaf_count = float(np.sum(bin_counts_feat[leaf_bins]))
+            if leaf_count <= 0.0:
+                continue
+            inv_count = 1.0 / leaf_count
+            block = np.ix_(leaf_bins, leaf_bins)
+            structure_delta[block] += inv_count
+
+        update_count_inc = 1
+
+    mu_local = float(np.dot(bin_counts_feat, update_bins) / n_float)
+    centered = np.clip(update_bins - mu_local, -truncation, truncation)
+
+    if round_idx <= warmup_rounds:
+        if learning_rate < 0.8:
+            local_learning_rate = learning_rate
+        else:
+            local_learning_rate = learning_rate / 2
+        new_warm = warm_scores_feat + local_learning_rate * centered
+        new_avg = avg_scores_feat
+    else:
+        new_warm = warm_scores_feat
+        new_avg = coeff * avg_scores_feat + (learning_rate / round_idx) * centered
+
+    return (
+        feat_idx,
+        new_warm,
+        new_avg,
+        mu_local,
+        structure_delta,
+        update_count_inc,
+    )

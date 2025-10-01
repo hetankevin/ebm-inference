@@ -81,43 +81,12 @@ from ._utils import (
     _auto_bins_for_numeric,
     _greedy_bin_segments,
     _post_fit_recenter,
+    empirical_coverage,
+    find_min_scale,
+    _parallel_update_feature,
 )
 
 _log = logging.getLogger(__name__)
-
-
-def empirical_coverage(c: float, y_true: np.ndarray, y_pred: np.ndarray, widths: np.ndarray) -> float:
-    """Fraction of observations covered by ``y_pred ± c * widths``."""
-
-    lower = y_pred - c * widths
-    upper = y_pred + c * widths
-    return float(np.mean((y_true >= lower) & (y_true <= upper)))
-
-
-def find_min_scale(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    widths: np.ndarray,
-    target: float = 0.95,
-    tol: float = 1e-3,
-    c_max: float = 50.0,
-    max_iters: int = 50,
-) -> float:
-    """Binary-search the smallest scale reaching the desired empirical coverage."""
-
-    lo, hi = 0.0, float(c_max)
-    if empirical_coverage(hi, y_true, y_pred, widths) < target:
-        raise ValueError(f"c_max={c_max} too small; increase it.")
-
-    for _ in range(max_iters):
-        mid = 0.5 * (lo + hi)
-        if empirical_coverage(mid, y_true, y_pred, widths) >= target:
-            hi = mid
-        else:
-            lo = mid
-        if hi - lo < tol:
-            break
-    return hi
 
 
 class EBMExplanation(FeatureValueExplanation):
@@ -4027,6 +3996,10 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         Minimum number of samples per bin for statistical inference computations.
         Bins with fewer samples than this threshold may be merged or excluded from
         statistical inference calculations to ensure numerical stability.
+    leave_one_out : bool, default=False
+        Option to leave current feature out when fitting learner on current feature.
+        Allows one to avoid having to perform the Boulevard scaling.
+        Requires random splits for stability. 
 
     Attributes
     ----------
@@ -4167,6 +4140,9 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         max_bins_auto: int = 255,
         min_bins_auto: int = 8,
         auto_bins_scheme: str = "quantile",
+
+        # Option to leave current feature out or not
+        leave_one_out : bool = False,
     ):
         """Initialise the Inferable EBM with boulevard-style defaults and inference knobs.
 
@@ -4296,7 +4272,12 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         )
         
         # Store statistical inference specific parameters
-        self.boulevard_scale = (1+self.learning_rate)/self.learning_rate
+        self.leave_one_out = leave_one_out
+        if self.leave_one_out:
+            self.boulevard_scale = 1
+            self.learning_rate = 1
+        else:
+            self.boulevard_scale = (1+self.learning_rate)/self.learning_rate
         self.subsample_rate = subsample_rate
         self.truncation = truncation
         self.warmup_rounds = int(max(0, warmup_rounds))
@@ -4471,6 +4452,9 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             native_datasets.append(shared.dataset)
             shared_handles.append(shared)
 
+        # Initialize training bins
+        self._initialize_training_bins()
+
         # Pre-compute per-bin weights (counts) used for centring/intercept updates
         if sample_weight is None:
             bin_counts = [
@@ -4524,6 +4508,8 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
             if smoothing_rounds > 0:
                 # modify some of our parameters temporarily
                 term_boost_flags_local = term_boost_flags | Native.TermBoostFlags_RandomSplits
+            else:
+                term_boost_flags_local = term_boost_flags
             smoothing_rounds -= 1
             preds_previous = preds.copy()
 
@@ -4539,114 +4525,62 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                 masks = [full_mask] * n_features
 
             coeff = (round_idx - 1.0) / round_idx
-
-            def _update_feature(feat_idx, mask):
-                native = Native.get_native_singleton()
-                dataset = native_datasets[feat_idx]
-
-                bag = np.zeros(n_samples, dtype=np.int8)
-                bag[mask] = 1
-                init_scores_subset = preds_previous[mask].astype(np.float64, copy=True)
-                intercept_arr = np.array([0.0], dtype=np.float64)
-
-                with Booster(
-                    dataset,
-                    intercept_arr,
-                    bag,
-                    init_scores_subset,
-                    [(0,)],
-                    0,
-                    None,
-                    Native.CreateBoosterFlags_Default,
-                    "rmse",
-                    develop.get_option("acceleration"),
-                    None,
-                ) as booster:
-                    booster.generate_term_update(
-                        None,
-                        term_idx=0,
-                        term_boost_flags=term_boost_flags_local,
-                        learning_rate=1,
-                        min_samples_leaf=min_leaf,
-                        min_hessian=min_hessian,
-                        reg_alpha=reg_alpha,
-                        reg_lambda=reg_lambda,
-                        max_delta_step=max_delta_step,
-                        min_cat_samples=min_cat_samples,
-                        cat_smooth=cat_smooth,
-                        max_cat_threshold=0,
-                        cat_include=1.0,
-                        max_leaves=max_leaves,
-                        monotone_constraints=None,
-                    )
-                    splits_per_dim = booster.get_term_update_splits()
-                    update_bins = booster.get_term_update()
-
-                update_bins = np.asarray(update_bins, dtype=float)
-
-                counts_feat = bin_counts[feat_idx]
-                struct_H = structure_H_sums[feat_idx]
-                n_bins_feat = update_bins.shape[0]
-                if n_bins_feat > 0:
-                    if splits_per_dim and len(splits_per_dim) > 0:
-                        split_values = np.asarray(splits_per_dim[0], dtype=np.int64)
-                    else:
-                        split_values = np.empty(0, dtype=np.int64)
-
-                    if split_values.size:
-                        split_values = np.clip(split_values, 0, n_bins_feat)
-                        split_values = np.unique(split_values)
-
-                    boundaries = np.empty(split_values.size + 2, dtype=np.int64)
-                    boundaries[0] = 0
-                    if split_values.size:
-                        boundaries[1:-1] = split_values
-                    boundaries[-1] = n_bins_feat
-
-                    for start, stop in zip(boundaries[:-1], boundaries[1:]):
-                        if stop <= start:
-                            continue
-                        leaf_bins = np.arange(start, stop, dtype=np.int64)
-                        leaf_size = leaf_bins.size
-                        if leaf_size == 0:
-                            continue
-                        leaf_count = float(np.sum(counts_feat[leaf_bins]))
-                        if leaf_count <= 0.0:
-                            continue
-                        inv_count = 1.0 / leaf_count
-                        block = np.ix_(leaf_bins, leaf_bins)
-                        struct_H[block] += inv_count
-
-                    structure_update_counts[feat_idx] += 1
-
-                mu_local = float(np.dot(bin_counts[feat_idx], update_bins) / n_float)
-                centered = np.clip(update_bins - mu_local, -truncation, truncation)
-                # Warmup: additive updates for the first K rounds, then Boulevard 1/t averaging
-                if round_idx <= self.warmup_rounds:
-                    new_warm = warm_scores[feat_idx] + self.learning_rate * centered
-                    new_avg = avg_scores[feat_idx]
-                else:
-                    new_warm = warm_scores[feat_idx]
-                    new_avg = coeff * avg_scores[feat_idx] + (self.learning_rate / round_idx) * centered
-                return feat_idx, new_warm, new_avg, mu_local
+            tasks = [
+                (
+                    feat_idx,
+                    masks[feat_idx],
+                    native_datasets[feat_idx],
+                    preds_previous,
+                    self.term_scores_[feat_idx],
+                    self.train_bins_by_feat_[feat_idx],
+                    warm_scores[feat_idx],
+                    avg_scores[feat_idx],
+                    bin_counts[feat_idx],
+                    structure_H_sums[feat_idx],
+                    n_samples,
+                    truncation,
+                    learning_rate,
+                    self.warmup_rounds,
+                    round_idx,
+                    coeff,
+                    n_float,
+                    max_leaves,
+                    min_leaf,
+                    min_hessian,
+                    reg_alpha,
+                    reg_lambda,
+                    max_delta_step,
+                    min_cat_samples,
+                    cat_smooth,
+                    term_boost_flags_local,
+                    bool(self.leave_one_out),
+                )
+                for feat_idx in range(n_features)
+            ]
 
             n_jobs_effective = effective_n_jobs(self.n_jobs)
             if n_jobs_effective <= 1:
-                results = [
-                    _update_feature(feat_idx, masks[feat_idx])
-                    for feat_idx in range(n_features)
-                ]
+                results = [_parallel_update_feature(*task) for task in tasks]
             else:
-                parallel_executor = Parallel(n_jobs=self.n_jobs, prefer="threads")
+                parallel_executor = Parallel(n_jobs=self.n_jobs, backend='loky')
                 results = parallel_executor(
-                    delayed(_update_feature)(feat_idx, masks[feat_idx])
-                    for feat_idx in range(n_features)
+                    delayed(_parallel_update_feature)(*task) for task in tasks
                 )
 
-            for feat_idx, new_warm, new_avg, mu_local in results:
+            for (
+                feat_idx,
+                new_warm,
+                new_avg,
+                _mu_local,
+                structure_delta,
+                update_count_inc,
+            ) in results:
                 warm_scores[feat_idx] = new_warm
                 avg_scores[feat_idx] = new_avg
                 self.term_scores_[feat_idx] = new_warm + new_avg
+                if structure_delta is not None:
+                    structure_H_sums[feat_idx] += structure_delta
+                structure_update_counts[feat_idx] += update_count_inc
 
             # Refresh the intercept so that predictions remain unbiased after applying
             # the new feature contributions.  This mirrors the effect of Algorithm 1's
@@ -4657,7 +4591,6 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                 contributions += self.term_scores_[j][self.train_bins_by_feat_[j]]
             self.intercept_ = float(np.mean(y - contributions))
             preds = self.intercept_ + contributions
-            
 
         for shared in shared_handles:
             shared.reset()
@@ -5071,7 +5004,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
                 self.structure_update_counts,
             )
             self._bin_cache_ready_ = True
-            
+
         preds, widths = self._compute_interval_components(X, mode, level, sigma)
         scale = self._interval_scale(mode, level)
         adj_widths = scale * widths
@@ -5199,6 +5132,7 @@ class InferableEBMRegressor(RegressorMixin, EBMModel):
         z = float(zmap.get(float(level), 1.95996))
 
         term_idx = self._feature_term_map_.get(feature_idx)
+
         if term_idx is None:
             raise ValueError(
                 f"Feature index {feature_idx} does not have an associated main-effect term."

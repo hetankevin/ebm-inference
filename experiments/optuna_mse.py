@@ -270,10 +270,10 @@ def tune_parameters(
                 "truncation": trial.suggest_float("truncation", 100.0, 10000.0),
                 "random_state": args.seed,
                 'n_jobs' : 1,
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.8, log=True),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 1., log=True),
                 'auto_bins_scheme': trial.suggest_categorical('auto_bins_scheme', ['quantile', 'cube']),
-                "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 10.0, log=True),
-                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 16),
+                "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 1000.0, log=True),
+                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 64),
                 'max_leaves' : trial.suggest_categorical('max_leaves', [2**i for i in range(1,8)])
             }
             model = InferableEBMRegressor(**params)
@@ -425,7 +425,7 @@ def plot_results(dataset_name: str, ensemble_sizes: List[int], mse_curves: Dict[
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     #"wine", "obesity", "air"
-    parser.add_argument("--datasets", nargs="*", default=["obesity"], choices=list(DATASET_LOADERS.keys()))
+    parser.add_argument("--datasets", nargs="*", default=["wine", "obesity", "air"], choices=list(DATASET_LOADERS.keys()))
     parser.add_argument("--n-trials", type=int, default=100)
     parser.add_argument("--timeout", type=int, default=None, help="Optional timeout per model (seconds)")
     parser.add_argument("--seed", type=int, default=0)
@@ -437,9 +437,9 @@ def main():
         default=None,
         help="Explicit ensemble sizes to evaluate (default: 50 100 200)",
     )
-    parser.add_argument("--ensemble-start", type=int, default=50)
-    parser.add_argument("--ensemble-stop", type=int, default=300)
-    parser.add_argument("--ensemble-step", type=int, default=50)
+    parser.add_argument("--ensemble-start", type=int, default=20)
+    parser.add_argument("--ensemble-stop", type=int, default=200)
+    parser.add_argument("--ensemble-step", type=int, default=20)
     parser.add_argument("--plot", type=str, default="plots/optuna_mse.png")
     parser.add_argument("--show", action="store_true")
     cpu_total = os.cpu_count() or 1
@@ -479,7 +479,6 @@ def main():
             base_models.append("LightGBM")
         if xgb is not None:
             base_models.append("XGBoost")
-        base_models=['InferableEBM', 'ElasticNet']
         dataset_infos.append(
             SimpleNamespace(
                 name=dataset.name,

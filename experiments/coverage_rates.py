@@ -199,6 +199,7 @@ def run_rep(rep, args, base_seed=0):
         n_jobs=args.n_jobs,
         outer_bags=1,
         auto_bins_scheme=args.auto_bins_scheme,
+        leave_one_out=args.leave_one_out,
     )
 
     ebm = InferableEBMRegressor(**estimator_kwargs)
@@ -406,6 +407,7 @@ def main():
     ap.add_argument("--rounds", type=int, default=100)
     ap.add_argument("--max-leaves", type=int, default=2**3)
     ap.add_argument("--n-bins", dest="n_bins", type=int, default=0)
+    ap.add_argument("--leave-one-out", type=bool, default=False)
     ap.add_argument("--max-bins-auto", dest="max_bins_auto", type=int, default=255)
     ap.add_argument("--n-jobs", type=int, default=1)
     ap.add_argument("--subsample-rate", dest="subsample_rate", type=float, default=1)
