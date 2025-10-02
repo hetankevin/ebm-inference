@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark multiple regressors with Optuna on UCI datasets and plot MSE curves."""
+"""Benchmark multiple regressors with Optuna on the scikit-learn diabetes dataset."""
 import argparse
 import json
 import os
 import sys
-import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +21,7 @@ from optuna.samplers import TPESampler
 
 # scikit-learn
 from sklearn.compose import ColumnTransformer
+from sklearn.datasets import load_diabetes
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet
@@ -56,26 +56,15 @@ if str(_ROOT) not in sys.path:
 
 from inferable_ebm_regressor import InferableEBMRegressor  # noqa: E402
 
-CACHE_DIR = _ROOT / "data" / "uci"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-# URLs for datasets
-WINE_URLS = [
-    "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv",
-    "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv",
-]
-OBESITY_URL = "https://www.kaggle.com/api/v1/datasets/download/manvendrarajsingh/obesitydataset-raw-and-data-sinthetic"
-AIR_QUALITY_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00360/AirQualityUCI.zip"
-
 # Fixed plotting order for models
 # Only models present in results will be plotted, in this order.
 PLOT_MODEL_ORDER = [
     "InferableEBM",
-    "InferableEBM LOO",
     "EBM",
     "LightGBM",
     "XGBoost",
     "RandomForest",
+    "GradientBoosting",
     "ElasticNet",
 ]
 
@@ -86,67 +75,17 @@ class Dataset:
     y: pd.Series
 
 
-def _sanitize_target(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    mask = y.replace([np.inf, -np.inf], np.nan).notna()
-    if not mask.all():
-        X = X.loc[mask].reset_index(drop=True)
-        y = y.loc[mask].reset_index(drop=True)
-    return X, y
-
-
-def download_file(url: str, dest: Path) -> Path:
-    if dest.exists():
-        return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    import urllib.request
-
-    print(f"Downloading {url} -> {dest}")
-    urllib.request.urlretrieve(url, dest)
-    return dest
-
-
-def load_wine_quality() -> Dataset:
-    frames = []
-    for url in WINE_URLS:
-        local = download_file(url, CACHE_DIR / Path(url).name)
-        df = pd.read_csv(local, sep=";")
-        frames.append(df)
-    data = pd.concat(frames, axis=0).reset_index(drop=True)
-    y = data.pop("quality")
-    data, y = _sanitize_target(data, y)
-    return Dataset("Wine Quality", data, y)
-
-
-def load_obesity() -> Dataset:
-    local = download_file(OBESITY_URL, CACHE_DIR / "ObesityData.csv")
-    df = pd.read_csv(local, encoding="latin-1")
-    # Use weight (continuous) as target
-    y = df.pop("Weight")
-    # Drop columns with too many missing values, keep features
-    df, y = _sanitize_target(df, y)
-    return Dataset("Obesity", df, y)
-
-
-def load_air_quality() -> Dataset:
-    zip_path = download_file(AIR_QUALITY_URL, CACHE_DIR / "AirQualityUCI.zip")
-    csv_path = CACHE_DIR / "AirQualityUCI.csv"
-    if not csv_path.exists():
-        with zipfile.ZipFile(zip_path) as zf:
-            with zf.open("AirQualityUCI.csv") as zfile:
-                content = zfile.read()
-                csv_path.write_bytes(content)
-    df = pd.read_csv(csv_path, sep=";", decimal=",", na_values=[-500], encoding="latin-1", engine="python")
-    df = df.drop(columns=[col for col in df.columns if col.strip() == ""])  # drop empty column
-    y = df.pop("CO(GT)")
-    df = df.drop(columns=["Date", "Time"], errors="ignore")
-    df, y = _sanitize_target(df, y)
-    return Dataset("Air Quality", df, y)
+def load_diabetes_dataset(_n_samples: int, _noise_std: float, _seed: int) -> Dataset:
+    """Load the diabetes regression dataset as a pandas DataFrame."""
+    data_bundle = load_diabetes(as_frame=True)
+    X = data_bundle.data.copy()
+    y = data_bundle.target.copy()
+    y.name = y.name or "target"
+    return Dataset("Diabetes", X, y)
 
 
 DATASET_LOADERS = {
-    "wine": load_wine_quality,
-    "obesity": load_obesity,
-    "air": load_air_quality,
+    "diabetes": load_diabetes_dataset,
 }
 
 
@@ -229,70 +168,57 @@ def tune_parameters(
         if model_name == "RandomForest":
             params = {
                 "n_estimators": 500,
-                "max_depth": trial.suggest_int("max_depth", 2, 8),
+                "max_depth": 4,
                 "random_state": args.seed,
+                'min_samples_leaf' : 1,
                 "n_jobs": 1,
             }
             model = RandomForestRegressor(**params)
         elif model_name == "GradientBoosting":
             params = {
                 "n_estimators": 500,
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-                "max_depth": trial.suggest_int("max_depth", 2, 8),
+                "learning_rate": 0.1,
+                'min_samples_split' : 2,
+                'min_samples_leaf' : 1,
+                "max_depth": 4,
                 "random_state": args.seed,
-                "n_jobs": 1,
             }
             model = GradientBoostingRegressor(**params)
         elif model_name == "ElasticNet":
             params = {
-                "alpha": trial.suggest_float("alpha", 1e-4, 10.0, log=True),
-                "l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
+                "alpha": 1e-2,
+                "l1_ratio": 0.1,
                 "max_iter": 10000,
                 "random_state": args.seed,
             }
             model = ElasticNet(**params)
         elif model_name == "EBM":
             params = {
-                "max_bins": trial.suggest_int("max_bins", 64, 256),
+                "max_bins": 255,
                 "max_rounds": 500,
                 'interactions' : 0.0,
+                'min_samples_leaf' : 1,
                 "outer_bags": 1,
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.02),
+                "learning_rate": 0.1,
                 "random_state": args.seed,
-                'n_jobs' : 4
+                'max_leaves' : 2**4,
+                'n_jobs' : 1
             }
             model = ExplainableBoostingRegressor(**params)
         elif model_name == "InferableEBM":
             params = {
-                "max_bins_auto": trial.suggest_int("max_bins_auto", 64, 512),
+                "max_bins_auto": 255,
                 "max_rounds": 500,
-                'warmup_rounds' : trial.suggest_int("warmup_rounds", 0, 500),
-                "subsample_rate": trial.suggest_float("subsample_rate", 0.8, 1.0),
-                "truncation": trial.suggest_float("truncation", 100.0, 10000.0),
+                'warmup_rounds' : 0,
+                "subsample_rate": 1,
+                "truncation": 2000,
                 "random_state": args.seed,
                 'n_jobs' : 1,
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 1., log=True),
-                'auto_bins_scheme': trial.suggest_categorical('auto_bins_scheme', ['quantile', 'cube']),
-                "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 1000.0, log=True),
-                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 64),
-                'max_leaves' : trial.suggest_categorical('max_leaves', [2**i for i in range(1,8)])
-            }
-            model = InferableEBMRegressor(**params)
-        elif model_name == "InferableEBM LOO":
-            params = {
-                "max_bins_auto": trial.suggest_int("max_bins_auto", 64, 512),
-                "max_rounds": 500,
-                'warmup_rounds' : trial.suggest_int("warmup_rounds", 0, 500),
-                "subsample_rate": trial.suggest_float("subsample_rate", 0.8, 1.0),
-                "truncation": trial.suggest_float("truncation", 100.0, 10000.0),
-                "random_state": args.seed,
-                'n_jobs' : 1,
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 1., log=True),
-                'auto_bins_scheme': trial.suggest_categorical('auto_bins_scheme', ['quantile', 'cube']),
-                "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 1000.0, log=True),
-                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 64),
-                'max_leaves' : trial.suggest_categorical('max_leaves', [2**i for i in range(1,8)]),
-                'leave_one_out': True,
+                "learning_rate": 1,
+                'auto_bins_scheme': 'quantile',
+                "reg_lambda": 0,
+                'min_samples_leaf': 1,
+                'max_leaves' : 2**4
             }
             model = InferableEBMRegressor(**params)
         elif model_name == "LightGBM":
@@ -300,8 +226,11 @@ def tune_parameters(
                 raise optuna.exceptions.TrialPruned()
             params = {
                 "n_estimators": 500,
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-                "max_depth": trial.suggest_int("max_depth", 2, 8),
+                "learning_rate": 0.1,
+                'colsample_bytree' : 0.8,
+                'min_samples_split' : 2,
+                'min_samples_leaf' : 1,
+                "max_depth": 4,
                 "random_state": args.seed,
                 "n_jobs": 1,
                 'verbose' : -1
@@ -312,8 +241,11 @@ def tune_parameters(
                 raise optuna.exceptions.TrialPruned()
             params = {
                 "n_estimators": 500,
-                "eta": trial.suggest_float("eta", 0.01, 0.3, log=True),
-                "max_depth": trial.suggest_int("max_depth", 2, 8),
+                "eta": 0.1,
+                'colsample_bytree' : 0.8,
+                'min_samples_split' : 2,
+                'min_samples_leaf' : 1,
+                "max_depth": 4,
                 "random_state": args.seed,
                 "tree_method": "hist",
                 'n_jobs' : 1
@@ -348,7 +280,7 @@ def instantiate(model_name: str, params: Dict, ensemble_size: Optional[int], arg
         params.update({"n_estimators": ensemble_size, "random_state": args.seed, 'n_jobs' : 1})
         return RandomForestRegressor(**params)
     if model_name == "GradientBoosting":
-        params.update({"n_estimators": ensemble_size, "random_state": args.seed, 'n_jobs' : 1})
+        params.update({"n_estimators": ensemble_size, "random_state": args.seed})
         return GradientBoostingRegressor(**params)
     if model_name == "ElasticNet":
         params.update({"max_iter": 10000, "random_state": args.seed})
@@ -361,14 +293,6 @@ def instantiate(model_name: str, params: Dict, ensemble_size: Optional[int], arg
             "max_rounds": ensemble_size,
             "random_state": args.seed,
             'n_jobs' : 1,
-        })
-        return InferableEBMRegressor(**params)
-    if model_name == "InferableEBM LOO":
-        params.update({
-            "max_rounds": ensemble_size,
-            "random_state": args.seed,
-            'n_jobs' : 1,
-            'leave_one_out': True,
         })
         return InferableEBMRegressor(**params)
     if model_name == "LightGBM":
@@ -385,6 +309,39 @@ def instantiate(model_name: str, params: Dict, ensemble_size: Optional[int], arg
     raise ValueError(model_name)
 
 
+def _evaluate_single_trial(
+    model_name: str,
+    params: Dict,
+    column_groups: Tuple[List[str], List[str]],
+    ensemble_sizes: List[int],
+    trial_split: Tuple[int, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series],
+    args_dict: Dict,
+    show_progress: bool,
+) -> List[float]:
+    print('Fitting '+model_name)
+    seed, X_train, X_test, y_train, y_test = trial_split
+    trial_args = SimpleNamespace(**args_dict)
+    trial_args.seed = seed
+    trial_mses: List[float] = []
+    last_mse: Optional[float] = None
+    size_iterable = tqdm(ensemble_sizes, leave=False) if show_progress else ensemble_sizes
+    for size in size_iterable:
+        if model_name == "ElasticNet" and last_mse is not None:
+            trial_mses.append(last_mse)
+            continue
+        model = instantiate(model_name, params, size, trial_args)
+        if model_name in ("EBM", "InferableEBM"):
+            pipeline = Pipeline([("model", model)])
+        else:
+            preprocessor = _make_preprocessor(*column_groups)
+            pipeline = Pipeline([("pre", preprocessor), ("model", model)])
+        pipeline.fit(X_train, y_train)
+        preds = pipeline.predict(X_test)
+        last_mse = root_mean_squared_error(y_test, preds)
+        trial_mses.append(last_mse)
+    return trial_mses
+
+
 def _evaluate_model_curve(
     dataset_name: str,
     model_name: str,
@@ -393,42 +350,51 @@ def _evaluate_model_curve(
     trial_splits: List[Tuple[int, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]],
     ensemble_sizes: List[int],
     args_dict: Dict,
-) -> Tuple[str, str, List[List[float]]]:
-    mses_by_trial: List[List[float]] = []
-    for seed, X_train, X_test, y_train, y_test in trial_splits:
-        trial_args = SimpleNamespace(**args_dict)
-        trial_args.seed = seed
-        trial_mses: List[float] = []
-        last_mse: Optional[float] = None
-        for size in tqdm(ensemble_sizes, leave=False):
-            if model_name == "ElasticNet" and last_mse is not None:
-                trial_mses.append(last_mse)
-                continue
-            model = instantiate(model_name, params, size, trial_args)
-            if model_name in ("EBM", "InferableEBM", "InferableEBM LOO"):
-                pipeline = Pipeline([("model", model)])
-            else:
-                preprocessor = _make_preprocessor(*column_groups)
-                pipeline = Pipeline([("pre", preprocessor), ("model", model)])
-            pipeline.fit(X_train, y_train)
-            preds = pipeline.predict(X_test)
-            last_mse = root_mean_squared_error(y_test, preds)
-            trial_mses.append(last_mse)
-        mses_by_trial.append(trial_mses)
-    return dataset_name, model_name, mses_by_trial
+    max_workers: int = 1,
+    ) -> Tuple[str, str, List[List[float]]]:
+    if max_workers is None:
+        max_workers = 1
+    effective_workers = max(1, min(max_workers, len(trial_splits))) if trial_splits else 1
+    mses_by_trial: List[Optional[List[float]]] = [None] * len(trial_splits)
 
+    if effective_workers == 1:
+        trial_iterator = tqdm(trial_splits, desc=f"{model_name} trials", leave=False)
+        results: List[List[float]] = []
+        for trial_split in trial_iterator:
+            trial_mses = _evaluate_single_trial(
+                model_name,
+                params,
+                column_groups,
+                ensemble_sizes,
+                trial_split,
+                args_dict,
+                show_progress=True,
+            )
+            results.append(trial_mses)
+        return dataset_name, model_name, results
 
-def _tune_model_task(
-    dataset_name: str,
-    model_name: str,
-    X: pd.DataFrame,
-    y: pd.Series,
-    column_groups: Tuple[List[str], List[str]],
-    args_dict: Dict,
-):
-    args_ns = SimpleNamespace(**args_dict)
-    params = tune_parameters(model_name, X, y, column_groups, args_ns)
-    return dataset_name, model_name, params
+    with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+        futures = {}
+        for idx, trial_split in enumerate(trial_splits):
+            print(idx)
+            future = executor.submit(
+                _evaluate_single_trial,
+                model_name,
+                params,
+                column_groups,
+                ensemble_sizes,
+                trial_split,
+                args_dict,
+                True,
+            )
+            futures[future] = idx
+        for future in as_completed(futures):
+            idx = futures[future]
+            mses_by_trial[idx] = future.result()
+
+    # mypy hint: all entries filled
+    completed = [trial for trial in mses_by_trial if trial is not None]
+    return dataset_name, model_name, completed
 
 
 def plot_results(dataset_name: str, ensemble_sizes: List[int], mse_curves: Dict[str, Dict[str, List[float]]], ax):
@@ -443,8 +409,8 @@ def plot_results(dataset_name: str, ensemble_sizes: List[int], mse_curves: Dict[
             continue
         if stderr.size != mean.size:
             raise ValueError(f"Standard error for {name} must match ensemble sizes")
-        lower = np.maximum(mean - 2 * stderr, 1e-8)
-        upper = mean + 2 * stderr
+        lower = np.maximum(mean - 2*stderr, 1e-8)
+        upper = mean + 2*stderr
         line_style = "--" if name == "ElasticNet" else "-"
         (line,) = ax.plot(ensemble_sizes, mean, label=name, linewidth=2, linestyle=line_style)
         ax.fill_between(ensemble_sizes, lower, upper, color=line.get_color(), alpha=0.3)
@@ -452,19 +418,30 @@ def plot_results(dataset_name: str, ensemble_sizes: List[int], mse_curves: Dict[
     ax.set_yscale("log")
     ax.set_xlabel("Ensemble Size")
     ax.set_ylabel("RMSE")
-    ax.set_title(dataset_name)
+    #ax.set_title(dataset_name)
     ax.grid(True, linestyle="--", alpha=0.5)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    #"wine", "obesity", "air"
-    parser.add_argument("--datasets", nargs="*", default=["wine", "obesity", "air"], choices=list(DATASET_LOADERS.keys()))
-    parser.add_argument("--n-trials", type=int, default=100)
+    parser.add_argument("--datasets", nargs="*", default=["diabetes"], choices=list(DATASET_LOADERS.keys()))
+    parser.add_argument("--n-trials", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=None, help="Optional timeout per model (seconds)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--test-size", type=float, default=0.2)
-    parser.add_argument("--num-trials", type=int, default=10, help="Number of independent train/test splits to average over")
+    parser.add_argument(
+        "--n-samples",
+        type=int,
+        default=0,
+        help="Unused placeholder; the diabetes dataset has a fixed sample size.",
+    )
+    parser.add_argument(
+        "--noise-std",
+        type=float,
+        default=0.0,
+        help="Unused placeholder; the diabetes dataset has no additive noise.",
+    )
+    parser.add_argument("--num-trials", type=int, default=50, help="Number of independent trials to average over")
     parser.add_argument(
         "--ensemble-sizes",
         type=int,
@@ -472,17 +449,17 @@ def main():
         default=None,
         help="Explicit ensemble sizes to evaluate (default: 50 100 200)",
     )
-    parser.add_argument("--ensemble-start", type=int, default=20)
-    parser.add_argument("--ensemble-stop", type=int, default=200)
-    parser.add_argument("--ensemble-step", type=int, default=20)
-    parser.add_argument("--plot", type=str, default="plots/optuna_mse.png")
+    parser.add_argument("--ensemble-start", type=int, default=1)
+    parser.add_argument("--ensemble-stop", type=int, default=501)
+    parser.add_argument("--ensemble-step", type=int, default=10)
+    parser.add_argument("--plot", type=str, default="plots/overfit_mse_diabetes.png")
     parser.add_argument("--show", action="store_true")
     cpu_total = os.cpu_count() or 1
     parser.add_argument(
         "--workers",
         type=int,
         default=max(1, cpu_total - 1),
-        help="Number of parallel processes for model tuning (1 disables multiprocessing)",
+        help="Number of parallel processes for evaluating num_trials (1 disables multiprocessing)",
     )
     args = parser.parse_args()
 
@@ -498,12 +475,13 @@ def main():
     else:
         ensemble_sizes = default_ensemble_sizes
 
-    datasets = [DATASET_LOADERS[name]() for name in args.datasets]
     dataset_infos: List[SimpleNamespace] = []
-    for dataset in datasets:
-        print(f"\n=== Dataset: {dataset.name} ===")
-        column_groups = _split_columns(dataset.X)
-        base_models = ["InferableEBM", "InferableEBM LOO", "EBM", "RandomForest", "ElasticNet"]
+    for dataset_key in args.datasets:
+        loader = DATASET_LOADERS[dataset_key]
+        base_dataset = loader(args.n_samples, args.noise_std, args.seed)
+        print(f"\n=== Dataset: {base_dataset.name} ===")
+        column_groups = _split_columns(base_dataset.X)
+        base_models = ['InferableEBM', "EBM", "RandomForest", 'GradientBoosting']
         if lgb is not None:
             base_models.append("LightGBM")
         if xgb is not None:
@@ -512,9 +490,10 @@ def main():
         trial_splits: List[Tuple[int, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]] = []
         for trial_idx in range(args.num_trials):
             trial_seed = args.seed + trial_idx
+            trial_dataset = loader(args.n_samples, args.noise_std, trial_seed)
             X_train, X_test, y_train, y_test = train_test_split(
-                dataset.X,
-                dataset.y,
+                trial_dataset.X,
+                trial_dataset.y,
                 test_size=args.test_size,
                 random_state=trial_seed,
             )
@@ -522,7 +501,7 @@ def main():
 
         dataset_infos.append(
             SimpleNamespace(
-                name=dataset.name,
+                name=base_dataset.name,
                 column_groups=column_groups,
                 base_models=base_models,
                 trial_splits=trial_splits,
@@ -536,84 +515,28 @@ def main():
     tuned_params_by_dataset = {info.name: {} for info in dataset_infos}
     args_dict = vars(args).copy()
 
-    if args.workers != 1:
-        max_workers = args.workers if args.workers > 0 else (os.cpu_count()-1 or 1)
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for info in dataset_infos:
-                _, tuning_X_train, _, tuning_y_train, _ = info.trial_splits[0]
-                for model_name in info.base_models:
-                    print(f"Tuning {model_name} on {info.name} ...")
-                    future = executor.submit(
-                        _tune_model_task,
-                        info.name,
-                        model_name,
-                        tuning_X_train,
-                        tuning_y_train,
-                        info.column_groups,
-                        args_dict,
-                    )
-                    futures[future] = (info.name, model_name)
-            for future in as_completed(futures):
-                dataset_name, model_name = futures[future]
-                try:
-                    result_dataset, result_model, params = future.result()
-                    print(model_name+' finished on '+dataset_name)
-                except Exception as exc:
-                    print(f"  Skipping {model_name} on {dataset_name}: {exc}")
-                else:
-                    tuned_params_by_dataset[result_dataset][result_model] = params
-    else:
-        for info in dataset_infos:
-            _, tuning_X_train, _, tuning_y_train, _ = info.trial_splits[0]
-            for model_name in info.base_models:
-                print(f"Tuning {model_name} on {info.name} ...")
-                try:
-                    params = tune_parameters(model_name, tuning_X_train, tuning_y_train, info.column_groups, args)
-                except Exception as exc:
-                    print(f"  Skipping {model_name} on {info.name}: {exc}")
-                else:
-                    tuned_params_by_dataset[info.name][model_name] = params
+    for info in dataset_infos:
+        tuning_seed, tuning_X_train, _, tuning_y_train, _ = info.trial_splits[0]
+        for model_name in info.base_models:
+            print(f"Tuning {model_name} on {info.name} ...")
+            try:
+                params = tune_parameters(model_name, tuning_X_train, tuning_y_train, info.column_groups, args)
+            except Exception as exc:
+                print(f"  Skipping {model_name} on {info.name}: {exc}")
+            else:
+                tuned_params_by_dataset[info.name][model_name] = params
 
     curves_by_dataset: Dict[str, Dict[str, Dict[str, List[float]]]] = {info.name: {} for info in dataset_infos}
     args_dict_eval = vars(args).copy()
-
-    if args.workers != 1:
-        max_workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for info in dataset_infos:
-                tuned_params = tuned_params_by_dataset.get(info.name, {})
-                for model_name, params in tuned_params.items():
-                    future = executor.submit(
-                        _evaluate_model_curve,
-                        info.name,
-                        model_name,
-                        params,
-                        info.column_groups,
-                        info.trial_splits,
-                        ensemble_sizes,
-                        args_dict_eval,
-                    )
-                    futures[future] = (info.name, model_name)
-            for future in as_completed(futures):
-                dataset_name, model_name = futures[future]
-                try:
-                    result_dataset, result_model, mses = future.result()
-                    print(f"  Evaluation succeeded for {model_name} on {dataset_name}")
-                except Exception as exc:
-                    print(f"  Evaluation failed for {model_name} on {dataset_name}: {exc}")
-                else:
-                    mses_array = np.asarray(mses)
-                    trial_count = max(1, mses_array.shape[0])
-                    curves_by_dataset[result_dataset][result_model] = {
-                        "mean": mses_array.mean(axis=0).tolist(),
-                        "stderr": (mses_array.std(axis=0, ddof=0) / np.sqrt(trial_count)).tolist(),
-                    }
+    if args.workers <= 0:
+        trial_workers = min(args.num_trials, os.cpu_count() or 1)
     else:
-        for info in dataset_infos:
-            tuned_params = tuned_params_by_dataset.get(info.name, {})
-            for model_name, params in tuned_params.items():
+        trial_workers = min(args.workers, args.num_trials)
+
+    for info in dataset_infos:
+        tuned_params = tuned_params_by_dataset.get(info.name, {})
+        for model_name, params in tuned_params.items():
+            try:
                 _, result_model, mses = _evaluate_model_curve(
                     info.name,
                     model_name,
@@ -622,13 +545,18 @@ def main():
                     info.trial_splits,
                     ensemble_sizes,
                     args_dict_eval,
+                    max_workers=trial_workers,
                 )
-                mses_array = np.asarray(mses)
-                trial_count = max(1, mses_array.shape[0])
-                curves_by_dataset[info.name][result_model] = {
-                    "mean": mses_array.mean(axis=0).tolist(),
-                    "stderr": (mses_array.std(axis=0, ddof=0) / np.sqrt(trial_count)).tolist(),
-                }
+            except Exception as exc:
+                print(f"  Evaluation failed for {model_name} on {info.name}: {exc}")
+                continue
+            print(f"  Evaluation succeeded for {model_name} on {info.name}")
+            mses_array = np.asarray(mses)
+            trial_count = max(1, mses_array.shape[0])
+            curves_by_dataset[info.name][result_model] = {
+                "mean": mses_array.mean(axis=0).tolist(),
+                "stderr": (mses_array.std(axis=0, ddof=0) / np.sqrt(trial_count)).tolist(),
+            }
 
     summary = {}
     for ax, info in zip(axes, dataset_infos):
@@ -638,8 +566,9 @@ def main():
             plot_results(info.name, ensemble_sizes, curves, ax)
 
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=len(handles))
+    fig.legend(handles, labels, loc = 'upper right')
     fig.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.title('Diabetes')
 
     if args.plot:
         out_dir = os.path.dirname(args.plot)

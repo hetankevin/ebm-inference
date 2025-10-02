@@ -395,7 +395,7 @@ def main():
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--n-samples", type=int, default=1000, help="Number of samples for the synthetic dataset")
     parser.add_argument("--noise-std", type=float, default=2.0, help="Noise standard deviation for the synthetic dataset")
-    parser.add_argument("--num-trials", type=int, default=30, help="Number of independent trials to average over")
+    parser.add_argument("--num-trials", type=int, default=50, help="Number of independent trials to average over")
     parser.add_argument(
         "--ensemble-sizes",
         type=int,
@@ -573,6 +573,7 @@ def main():
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc = 'upper right')
     fig.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.title('Simulation')
 
     if args.plot:
         out_dir = os.path.dirname(args.plot)
