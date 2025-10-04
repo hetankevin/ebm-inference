@@ -35,9 +35,6 @@ def main():
     ap.add_argument("--p", type=int, default=5)
     ap.add_argument("--noise", type=float, default=1.0)
     ap.add_argument("--rounds", type=int, default=400)
-    ap.add_argument("--use-nystrom", action="store_true")
-    ap.add_argument("--nystrom-rank", type=int, default=256)
-    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="mse_curves.csv")
     args = ap.parse_args()
 

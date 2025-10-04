@@ -31,7 +31,7 @@ def split3(X, y, rng, cal_frac=0.2, test_frac=0.3):
     return (X[tr], y[tr], tr), (X[cal], y[cal], cal), (X[te], y[te], te)
 
 def ebm_target_mean(Xtr, ytr, Xte, *, rounds, subsample_rate, truncation,
-                     replicates, use_nystrom, nystrom_rank, nystrom_ridge, seed0=1234):
+                     replicates, seed0=1234):
     """Approximate E[f_hat(x)] by averaging K independent refits (different seeds)."""
     preds = []
     for k in range(replicates):
@@ -40,9 +40,6 @@ def ebm_target_mean(Xtr, ytr, Xte, *, rounds, subsample_rate, truncation,
             subsample_rate=subsample_rate,
             truncation=truncation,
             random_state=seed0 + 7919 * k,
-            use_nystrom=use_nystrom,
-            nystrom_rank=nystrom_rank,
-            nystrom_ridge=nystrom_ridge,
         ).fit(Xtr, ytr)
         preds.append(m.predict(Xte))
     return np.mean(np.vstack(preds), axis=0)
@@ -56,9 +53,6 @@ def main():
     ap.add_argument("--subsample-rate", type=float, default=0.6, help="Use <1.0 for algorithmic randomness")
     ap.add_argument("--truncation", type=float, default=3.0)
     ap.add_argument("--replicates", type=int, default=20, help="K refits to approximate the EBM target")
-    ap.add_argument("--use-nystrom", action="store_true")
-    ap.add_argument("--nystrom-rank", type=int, default=256)
-    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="qq_plot_ci.png")
     args = ap.parse_args()
 
@@ -90,9 +84,6 @@ def main():
         subsample_rate=args.subsample_rate,
         truncation=args.truncation,
         replicates=args.replicates,
-        use_nystrom=args.use_nystrom,
-        nystrom_rank=args.nystrom_rank,
-        nystrom_ridge=args.nystrom_ridge,
         seed0=1234,
     )
 
@@ -101,8 +92,7 @@ def main():
     z = []
     rnorm = []
     for i in range(Xte.shape[0]):
-        r = ebm._r_vector(Xte[i])
-        nr = float(np.linalg.norm(r))
+        nr = ebm._bin_influence_norm(Xte[i])
         if not np.isfinite(nr) or nr < 1e-8:
             continue
         z.append((target_te[i] - preds_te[i]) / (sigma * nr))

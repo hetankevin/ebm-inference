@@ -1,0 +1,1703 @@
+          Statistical Inference for Explainable Boosting Regression
+
+
+
+                                              Anonymous Author
+                                              Anonymous Institution
+
+
+                     Abstract                              the behavior of black-box models.1 Another line of
+                                                           work attempts to convince practitioners to instead use
+                                                           inherently transparent models that can be directly in-
+    Explainable boosting machines (EBMs) are               spected by humans (Rudin, 2019). In light of this, Ex-
+    popular “glass-box” models that maintain               plainable Boosting Machines (EBM) Lou et al. (2012);
+    accuracy by boosting univariate trees and              Nori et al. (2019) have emerged as a popular “glass-
+    achieve explainability through clear visual-           box” model to strike the balance between both. In
+    izations of each feature’s effect. However, un-        essence, an EBM is built to learn Generalized Additive
+    like linear model coefficients, univariate EBM         Model (GAM) Hastie and Tibshirani (1986),   Ppwhere a
+    trees lack statistical inference, making it hard       signal f is assumed to be additive, i.e. f = k=1 f (k) ,
+    to know which features truly matter. We ad-            where each f (k) is assumed to be a univariate func-
+    dress this gap using recent advances in statis-        tion of the k-th feature. This design allows the mea-
+    tical inference for gradient boosting, provid-         surement of the marginal contribution of each feature
+    ing methods for statistical inference as well          like linear models, and where a justification for all
+    as end-to-end theoretical guarantees. Using            the interpretation methods above is that they return
+    a moving average instead of a sum of boosted           the “correct” value for additive models. While EBMs
+    trees (Boulevard regularization) allows the            impose strong structural constraints on the resulting
+    boosting process to converge to a feature-             prediction, their ability to reproduce noninearities,
+    wise kernel ridge regression. This produces            along with appropriate choices of additive structure,
+    asymptotically normal predictions that are             provides significant performance, often comparable to
+    only quadratically worse than the minimax              SoTA models such as XGBoost (Chen and Guestrin,
+    rate for nonparametric Lipschitz regression.           2016), CatBoost (Prokhorenkova et al., 2018), Light-
+    We construct prediction intervals for the re-          GBM (Ke et al., 2017).
+    sponse and confidence intervals for each uni-
+                                                           While EBMs provide a clear graphical representation
+    variate predictor, enabling rigorous hypoth-
+                                                           for the effects of each feature, these are still point es-
+    esis tests for feature importance and further
+                                                           timates. The central question we ask for uncertainty
+    explainability within EBMs.
+                                                           quantification can be phrased as this: Given a model
+                                                           design, if we collect a new dataset and retrain the
+                                                           model, how different would our new prediction be? In
+                                                           response to this question, vanilla EBMs (Lou et al.,
+1   Introduction                                           2012) proposed variance estimates via bootstrapping,
+                                                           providing coarse uncertainty quantification, though at
+Modern machine learning methods have proved highly         the cost of more complex computation.
+successful, achieving impressively high performance
+even for incredibly complicated prediction tasks. Still,   In contrast to EBMs, spline-based GAMs enjoy a
+this comes at a cost. These methods have been cri-         richer asymptotic theory. Wahba (1983) established
+tiqued for their lack of transparency, often described     the asymptotic distribution of smoothing spline es-
+as resulting in “black-box” models. Much work has          timators via a Bayesian posterior covariance argu-
+been done in an attempt to provide explanations for        ment, Silverman (1985) developed the equivalent ker-
+                                                           nel representation and convergence theory, and Nychka
+                                                           (1988) analyzed the frequentist coverage of Bayesian
+                                                              1
+                                                               Popular methods include LIME (Ribeiro et al., 2016),
+Preliminary work. Under review by AISTATS 2026. Do
+                                                           SHAP (Lundberg and Lee, 2017), ALE (Apley and Zhu,
+not distribute.
+                                                           2020) and partial dependence (Friedman, 2001) plots.
+                                  Manuscript under review by AISTATS 2026
+
+
+confidence intervals for smoothing splines. Built on         exploitation of basis representation?
+these developments, Wood (2006) investigated the cov-
+                                                             need to sketch out results and simulations
+erage of penalized regression spline intervals in the
+GAM setting, while Yoshida and Naito (2012) pro-
+vided a full asymptotic distribution theory for penal-       2     Setup
+ized spline estimators, establishing asymptotic normal-
+ity for each additive component.                             In this section, we introduce the problem setup with
+                                                             specified notations, as well as the assumptions this
+Despite this development Lou et al. (2012) argued for        study build on.
+using boosted trees to represent additive components
+due to their adaptive smoothing behavior, providing          Our goal is to learn a signal f that is additive with the
+performance advantages over splines, resuling in the         form as this.
+EBM model. Statistical theory for boosting meth-             Assumption 2.1 (Additive Lipschitz Nonparametric
+ods is limited to small numbers of boosting rounds           Regression). Let the response satisfy
+in Bühlmann (2002) and extended to structurally con-
+                                                                                p
+strained models including GAMs in Zhou and Hooker                               X
+(2022). Here we employ the Boulevard regularization                 y = β +           f (k) (x(k) ) + ϵ := f (x) + ϵ,
+                                                                                k=1
+method (Zhou and Hooker, 2019), replacing sums of
+trees with averages in the training process, which we        where y, β ∈ R, x = (x(1) , . . . , x(p) )⊤ ∈ Rp , and ε are
+adapt to the additive model structure of EBMs. Boule-        i.i.d. sub–Gaussian errors with mean zero and variance
+vard, particularly in conjunction with subsampling,          σ 2 < ∞. Assume the covariates have a bounded den-
+naturally avoids overfitting; this both downweighs the       sity on their support: ∃ 0 < c1 ≤ µ(x) ≤ c2 < ∞.
+influence of initial trees and allows us to study the        Each component function f (k) : R → R is mean–zero
+model in the limit of infinite boosting rounds in which      with respect to the marginal of x(k) , and is L-Lipschitz
+we can produce theoretical results without the need to       continuous.The intercept vector β is defined as the un-
+select or constrain the number of rounds. In particu-        conditional mean of the response,
+lar, our work makes the following contributions                                        Z
+                                                                        β = Ex,ϵ [y] = y dµx (x) dµϵ (ϵ).
+  • Asymptotic Theory. We establish a central
+    limit theorem for EBM predictors, showing that
+    the Boulevard-regularized ensemble converges to a        Each component function f (k) is mean–zero with re-
+    feature-wise kernel ridge regression. The resulting      spect to the marginal of x(k) .
+    predictions are asymptotically normal and achieve        Under such signal structure, we label each machine at
+    rates only quadratically worse than the minimax          boosting round b using feature k in Algorithm 1 as
+    rate for Lipschitz regression.                           f̂ (k) (x).
+  • Frequentist Inference. By leveraging our pro-
+    posed CLT for baseline vector β and feature-wise         3     Assumption
+    predictions f̂ (k) , we extend the heuristic bootstrap
+    to a set of inference toolkits: Formal confidence            1. Additive Lipschitz Nonparametric Regres-
+    intervals, prediction intervals and reproduction                sion: Let the response satisfy
+    intervals Zhou and Hooker (2019). This also al-
+                                                                                   p
+    lows a direct test of variable importance following                            X
+    the methods of Mentch and Hooker (2015). We                       y = β +            f (k) (x(k) ) + ϵ := f (x) + ϵ,
+                                                                                   k=1
+    round out those propositions by numerical exper-
+    iments to back up the validity of our algorithms.              where y, β ∈ R, x = (x(1) , . . . , x(p) )⊤ ∈ Rp ,
+  • Computational Efficiency. Unlike prior infer-                  and ε are i.i.d. sub–Gaussian errors with mean
+    ential approaches for random forests and boost-                zero and variance σ 2 < ∞. Assume the covari-
+    ing, we provide two methods to achieve speedups.               ates have a bounded density on their support:
+    One exploits the Nyström approximation of                     ∃ 0 < c1 ≤ µ(x) ≤ c2 < ∞. Each component
+    Musco and Musco (2017), while the other exploits               function f (k) : R → R is mean–zero with respect
+    the fact that modern implementations of regres-                to the marginal of x(k) , and is L-Lipschitz con-
+    sion trees use histograms. Both allow for inference            tinuous.The intercept vector β is defined as the
+    in linear time in the number of datapoints.                    unconditional mean of the response,
+                                                                                          Z
+Interaction models?                                                        β = Ex,ϵ [y] = y dµx (x) dµϵ (ϵ).
+                                          Manuscript under review by AISTATS 2026
+
+
+       Each component function f (k) is mean–zero with                 Algorithm 1 Inferable EBM
+       respect to the marginal of x(k) .                                1: Input: X ∈ Rn×p , y ∈ Rn , subsample rate ξ,
+                                                                           rounds B, truncation level M > 0.
+    2. Structure-Value Isolation: The structure of                                           Pn            (0)
+                                                                        2: Init: β0 ← n1        i=1 yi ; fk ← 0 for all k.
+       any tree is independent of the prediction made by
+                                                                        3: for b = 1 to B do
+       the terminal nodes. Algebraically, for a single tree
+                                                                        4:      for k = 1 to p in parallel do
+       at iteration b for feature k, one can write the pre-
+                                                                        5:         Sample Gb,k ⊂ {1, . . . , n} i.i.d. each i w.p.
+       diction on a training set X as a linear map from
+                                                                           ξ.
+       the observed vector y to the prediction:t̂(x) =                                                    P (b−1) (ℓ) 
+         (k)           (k)
+       Sb y, where Sb is the tree structure matrix de-                  6:         ri,k ← yi − β0 + ℓ fℓ                (xi ) for i ∈
+       fined below:                                                        Gb,k .
+                                                                                                            (k)
+                                                                        7:         Fit tree t(b,k) to {(xi , ri,k )}i∈Gb,k .
+                                                                                                  n            (k)
+                                  j ∈A(xi ))1(j∈w)
+                               1(x(k)                                              µb,k ← n1 i=1 t(b,k) (xi ).
+                                         (k)
+                                                                                               P
+                (k)                                                     8:
+               Si,j =
+                              l=1 1(xl ∈A(xi ))1(l∈w)
+                                      (k)     (k)
+                                                                                   t̃(b,k) (x) ← t(b,k) (x) − µb,k .
+                             Pn
+                                                                        9:
+                                                                       10:         t̃(b,k) (x) ← max{−M, min{t̃(b,k) (x), M }}
+                                                                 (k)
+    3. Non-adaptivity There exists a measure Qn on                         for all x.
+       the space of tree structures such that after some               11:         β0 ← β0 + µb,k .
+       burn-in period b′ , each individual univariate tree                            (b)
+                                                                                   fk ← b−1
+                                                                                                   (b−1)
+                                                                                                         + 1b t̃(b,k) .
+                                                                       12:                     b fk
+       structure constructed using feature k is an inde-               13:      end for
+                              (k)
+       pendent draw from Qn .                                          14: end for                           Pp         (B)
+                                                                       15: Output: fˆ(x) = β0 + 2 k=1 fk (x(k) ) with
+    4. Partition Distinctness: After the burn-in pe-                       P (B) (k)
+       riod, let E[S(k) ] denote the expected structure ma-                   i fk (xi ) = 0 for all k.
+                                                      (k)
+       trix for trees trained on feature k under Qn . We
+       assume there exists a constant c3 < 1 such that
+                                                                       Bühlmann, P. (2002). Consistency for l2-boosting
+       for all distinct features a ̸= k, c3 (p − 1) < 1 and
+                                                                         and matching pursuit with trees and tree-type basis
+                       E[S(a) ] E[S(k) ]     ≤ c3 .                      functions. In Research Report/Seminar für Statis-
+                                                                         tik, Eidgenössische Technische Hochschule (ETH),
+                                                                         volume 109. Seminar für Statistik, Eidgenössische
+    5. Shrinking Volume For any ν > 0, the mini-
+                                                  d+1                    Technische Hochschule (ETH).
+       mal leaf size is shrinking at rate vn = n− d+2 +ν <
+           d                                                           Chen, T. and Guestrin, C. (2016). Xgboost: A scal-
+       n− d+1 := O(ddn ).
+                                                                         able tree boosting system. In Proceedings of the
+    6. Asymptotic Locality We introduce a sequence                       22nd ACM SIGKDD International Conference on
+       {dn } with dn > 0, dn → 0, by which the diameter                  Knowledge Discovery and Data Mining, KDD ’16,
+       of any leaf is bounded from above. We require                     page 785–794. ACM.
+                                                 1
+                                                                      Friedman, J. H. (2001). Greedy function approxima-
+          sup diam(A) = O(dn ),       dn = O n− d+1 .                    tion: a gradient boosting machine. Annals of statis-
+       A∈q∈Qn
+                                                                         tics, pages 1189–1232.
+    7. Increasing Leaf The minimal number of points                    Hastie, T. and Tibshirani, R. (1986). Generalized Ad-
+       within one leaf is lower bounded by                               ditive Models. Statistical Science, 1(3):297 – 310.
+                                                                       Ke, G., Meng, Q., Finley, T., Wang, T., Chen, W.,
+                             n
+                             X                          1                Ma, W., Ye, Q., and Liu, T.-Y. (2017). Lightgbm:
+                 inf               I(xi,n ∈ A) = Ω(n   d+2   )           A highly efficient gradient boosting decision tree.
+                       (k)
+              A∈Π∈Qn         i=1
+                                                                         In Guyon, I., Luxburg, U. V., Bengio, S., Wallach,
+                                                                         H., Fergus, R., Vishwanathan, S., and Garnett, R.,
+4      Algorithms                                                        editors, Advances in Neural Information Processing
+                                                                         Systems, volume 30. Curran Associates, Inc.
+References
+                                                                       Lou, Y., Caruana, R., and Gehrke, J. (2012). Intelligi-
+Apley, D. W. and Zhu, J. (2020). Visualizing the ef-                     ble models for classification and regression. In Pro-
+ fects of predictor variables in black box supervised                    ceedings of the 18th ACM SIGKDD International
+ learning models. Journal of the Royal Statistical So-                   Conference on Knowledge Discovery and Data Min-
+ ciety Series B: Statistical Methodology, 82(4):1059–                    ing, KDD ’12, page 150–158, New York, NY, USA.
+ 1086.                                                                   Association for Computing Machinery.
+                                Manuscript under review by AISTATS 2026
+
+
+Lundberg, S. M. and Lee, S.-I. (2017). A unified ap-
+  proach to interpreting model predictions. Advances
+  in neural information processing systems, 30.
+Mentch, L. and Hooker, G. (2015). Quantifying un-
+ certainty in random forests via confidence intervals
+ and hypothesis tests.
+Musco, C. and Musco, C. (2017). Recursive sampling
+ for the nyström method.
+Nori, H., Jenkins, S., Koch, P., and Caruana, R.
+  (2019). Interpretml: A unified framework for ma-
+  chine learning interpretability.
+Nychka, D. (1988). Bayesian confidence intervals for
+ smoothing splines. Journal of the American Statis-
+ tical Association, 83(404):1134–1143.
+Prokhorenkova, L., Gusev, G., Vorobev, A., Doro-
+  gush, A. V., and Gulin, A. (2018). Catboost: unbi-
+  ased boosting with categorical features. In Proceed-
+  ings of the 32nd International Conference on Neu-
+  ral Information Processing Systems, NIPS’18, page
+  6639–6649, Red Hook, NY, USA. Curran Associates
+  Inc.
+Ribeiro, M. T., Singh, S., and Guestrin, C. (2016).
+  ” why should i trust you?” explaining the predic-
+  tions of any classifier. In Proceedings of the 22nd
+  ACM SIGKDD international conference on knowl-
+  edge discovery and data mining, pages 1135–1144.
+Rudin, C. (2019). Stop explaining black box machine
+ learning models for high stakes decisions and use
+ interpretable models instead. Nature machine intel-
+ ligence, 1(5):206–215.
+Silverman, B. W. (1985). Some aspects of the spline
+   smoothing approach to non-parametric regression
+   curve fitting. Journal of the Royal Statistical So-
+   ciety: Series B (Methodological), 47(1):1–21.
+Wahba, G. (1983). Bayesian ”confidence intervals” for
+ the cross-validated smoothing spline. Journal of the
+ Royal Statistical Society. Series B (Methodological),
+ 45(1):133–150.
+Wood, S. N. (2006). On confidence intervals for gen-
+ eralized additive models based on penalized regres-
+ sion splines. Australian & New Zealand Journal of
+ Statistics, 48(4):445–464.
+Yoshida, T. and Naito, K. (2012). Asymptotics for
+  penalized splines in generalized additive models.
+Zhou, Y. and Hooker, G. (2019). Boulevard: Regu-
+  larized stochastic gradient boosted trees and their
+  limiting distribution.
+Zhou, Y. and Hooker, G. (2022). Decision tree boosted
+  varying coefficient models. Data Mining and Knowl-
+  edge Discovery, 36(6):2237–2271.
+                                       Manuscript under review by AISTATS 2026
+
+
+A      Binning
+
+A.1      Bin-level Decomposition of the Structure Matrix
+
+In the special case where one uses histogram trees, there is a simpler form for the structure vector and ma-
+trix. When one performs binning automatically during pre-fitting, we can store the structure matrix in such a
+decomposition:
+
+
+                                          (k)       (k)
+                                                                                                         Pmk  (k)       (k)
+                                                                                                                               
+                                                                                                            l=1 1 Bl   ∈A(Bj )
+ (k)          (k) (k) ⊤ (k)             1(Bj     ∈A(Bi     ))                                     (k)  (k)
+S      = b(k)
+          n B    bn , Bi,j =         Pmk      (k)     (k)                    , (b(k)
+                                                                                 n )i,j =      1(xi ∈ Bj ) Pn    
+                                                                                                                   (k)     (k)
+                                                                                                                                           ,
+                                       l=1 1(Bl   ∈A(Bi ))                                                    q=1 1   xq ∈A(Bj   )
+                                                                mk ×mk                                                               n×mk
+
+
+where A(·) is the leaf that the bin (or sample) in its argument is in. The matrix B(k) then is the bin-structure
+matrix where the i, j-th entry contains the indicators of whether bin i is in the same leaf as bin j, normalized
+by the number of bins in the same leaf as bin i.
+We now introduce a few more definitions:
+
+                                                                                (k)
+    1. Bin index of a sample.           For each sample i, let ri ∈ {1, . . . , mk } be the unique bin index with
+        (k)   (k)
+       xi ∈ B (k) . That is, this is the index of the histogram bin that sample i belongs to along feature k.
+               ri
+
+    2. The set of bins in a given leaf. For a bin index r, define the set of bins in the unique tree leaf containing
+                (k)
+       the bin Br with index r along feature k:
+                                                   n                                     o
+                                        L(k) (r) := s ∈ {1, . . . , mk } : Bs(k) ∈ A Br(k) .
+
+       These are exactly the bins merged together by the tree into the same terminal node as bin r.
+
+    3. How many samples are in each bin, and how many bins are there in each leaf ?
+                       (k)
+       The bin count ns , or the number of samples in bin s along feature k, is given by:
+
+                                                                    n            
+                                                                         (k)
+                                                                    X
+                                                     n(k)
+                                                      s :=            1 xj ∈ Bs(k) .
+                                                                    j=1
+
+                                 (k)
+       The leaf sample count NL(r) and leaf bin count L(k) (r) are given by:
+
+                                                                                        mk              
+                                     (k)
+                                                   X                                    X
+                                 NL(r) :=                   n(k)
+                                                             q ,          L(k) (r) :=      1 q ∈ L(k) (r) .
+                                               q∈L(k) (r)                               q=1
+
+
+                                (k)
+       The leaf sample count NL(r) denotes how many training samples ended up in the leaf containing bin r. The
+       leaf bin count L(k) (r) denotes how many bins that the leaf containing bin r aggregates.
+
+    4. The assignment matrix of samples to bins.
+                                                                                                
+                                                        (k)          (k)               (k)     (k)
+                             Z(k)
+                              n   ∈ {0, 1}n×mk
+                                               , with Z i,j := 1   ri    = j   = 1   x i   ∈ Bj      .
+
+       This is the matrix where the i, j-th entry is 1 of sample i is in bin j, and 0 otherwise. Note that each sample
+                                                  (k)
+       lives in exactly one bin, so each row of Zn has a single 1.
+
+    5. Leaf-wise rescaling from bin-space to sample-space.
+                                                             
+                                             (k)          (k)
+       Define a diagonal matrix D(k) = diag ξ1 , . . . , ξmk with
+                                       Manuscript under review by AISTATS 2026
+
+
+
+               v           Pmk  (k)        (k)
+                                                 s
+               u (k)
+                 L   (r)    l=1 1 Bl ∈ A(Br )           Number of bins in leaf containing bin r
+      ξr(k) := t
+               u
+                   (k)
+                         = P                    =                                                     .
+                 NL(r)      n      (k)      (k)
+                                       ∈ A(Br )     Number of training samples in leaf containing bin r
+                            i=1 1 xi
+
+
+      The intuition is as follows. B(k) normalizes over bins in a leaf, while S(k) normalizes over samples in a leaf.
+      Some bins have more samples than others. We must therefore correct the bin-structure matrix so that it
+                                                                                                      (k)
+      normalizes over samples rather than bins, and so we construct D(k) to do exactly that. Note ξr is constant
+                                                                                                (k)   (k)
+      within a leaf, in the sense that if bins s and r are in the same leaf, we will then have ξr = ξs .
+
+We then have the following result.
+Lemma A.1 (Bin-Level Decomposition of Structure Matrix). We can decompose the structure matrix as follows:
+                                            (k)     (k)
+                                                             
+        (k)    (k) (k) (k) ⊤    (k)       1(Bj ∈A(Bi ))
+       Sn = bn B bn , Bi,j = Pmk                 (k)     (k)     , b(k)     (k) (k)
+                                                                     n = Zn D        ∈ Rn×mk .
+                                                              l=1 1(Bl        ∈A(Bi              ))
+                                                                                                      mk ×mk
+
+Similarly, we can also decompose the structure vector into the structure vector in bin space transformed to sample
+space:
+                                                                   (k)
+                                                                                   !
+                      (k)      (k) (k)         (k)  ⊤
+                                                               1(Bj ∈ A(x))
+                     sn (x) = bn b (x), b (x) = Pm                     (k)
+                                                                                              .
+                                                                k
+                                                              l=1 1(Bl     ∈ A(x)) j=1,...,mk
+
+Proof. Examine the i, j-th entry of the decomposition.
+                                                                          mk X
+                                                                               mk
+                                                                                                 (k)                           (k)
+                                                                            X
+                                           b(k)
+                                            n B
+                                                (k) (k)⊤
+                                                   bn                   =                       Zi,r ξr(k) B(k)  (k)
+                                                                                                            r,s ξs Zj,s
+                                                                  i,j
+                                                                            r=1 s=1
+
+
+         (k)           (k)
+Since Zi,. and Zj,. are both one-hot vectors, the double sum collapses to
+                                                                       
+                                                                                           (k)        (k)           (k)
+                                                     b(k)
+                                                      n B
+                                                          (k) (k)⊤
+                                                             bn                   = ξ (k) B (k) (k) ξ (k) ,
+                                                                            i,j            ri         ri    ,rj     rj
+
+         (k)
+where ri       is the bin index of the i-th sample across feature k.
+                                                                                                                                               (k)
+There are two cases. First, if the i-th and j-th samples are not in the same leaf, then B (k) (k) = 0, so the entry
+                                                                                         ri ,rj
+                         
+                      (k)
+is 0 . This matches Sn         = 0.
+                                i,j
+                                                                    
+                                                     (k)           (k)
+Otherwise, both bins lie in the same leaf L := L(k) ri     = L(k) rj . Then
+                                                                                                             s
+                                                  (k)        1                    (k)             (k)               |L|
+                                                B (k) (k) =     ,            ξ (k) = ξ (k) =                         (k)
+                                                                                                                           .
+                                                 ri ,rj     |L|                   ri             rj
+                                                                                                                   NL
+
+Hence
+                                                                   s                   !                    s            !
+                                 (k)       (k)          (k)                 |L|               1                   |L|                1
+                                ξ (k) B (k) (k) ξ (k) =                  (k)
+                                                                                           ·     ·                 (k)
+                                                                                                                               =     (k)
+                                                                                                                                           .
+                                 ri        ri    ,rj    rj
+                                                                        NL                   |L|                  NL               NL
+
+But
+                                                   
+                                      (k)        (k)
+                                1 xj ∈ A xi                 1                                                    (k)                               (k)
+                      S(k)
+                       n       =P                       = (k)                                     when xj             shares leaf L with xi .
+                           i,j   n        (k)        (k)
+                                 ℓ=1 1 xℓ     ∈ A xi         NL
+                                       Manuscript under review by AISTATS 2026
+
+                                   
+      (k)      (k)⊤               (k)
+Thus bn B (k) bn               = Sn              in all cases.
+                         i,j               i,j
+
+The proof for the structure vector follows analogously.
+
+A.2   Computing the Kernel Vector in Bin Space
+
+We are interested in computing the expectations
+
+
+                                                                                                                      p
+                         ⊤ (k) ⊤                                              (k) (k) (k) ⊤                                         (k) (k) ⊤
+                h                i                                         h                i                         X      h                i
+ k(k)
+  n   (x) :
+            = E  b(k)
+                      (x) bn       ∈ R1×n ,           K(k)
+                                                       n   := E[S(k)
+                                                                 n   ] = E   bn  B   bn       ,            K=               E b(k)
+                                                                                                                               n   B   bn       ,
+                                                                                                                      k=1
+
+
+and the norm of the weighting vector
+
+
+                                           r(k) (x)⊤ := E[b(k)
+                                                           n b
+                                                               (k)
+                                                                   (x)]⊤ Jn [I + Jn K]−1 ,
+where Jn is the centering matrix Jn = In − n1 1n 1⊤
+                                                  n.
+
+
+Structure vectors and matrices.            We first turn our attention to the structure matrix. First note that
+as the expectation is taken over the ensemble, and the bin assignments are the same for every member of the
+                        (k)
+ensemble, we can pull Zn out of the expectation. We then have
+
+                                              (k) (k) (k) ⊤                                   ⊤
+                                           h                i           h              i
+                      K(k)
+                        n   = E[S(k)
+                                 n   ] = E   bn  B   bn       = Z (k)
+                                                                  n   E   D(k) (k) (k)
+                                                                              B   D      Z(k)
+                                                                                          n     .
+
+
+The overall kernel matrix then can be written as:
+                                 p                                           p
+                                                                                                           !
+                                                    (k) (k) ⊤                                                         ⊤
+                                 X         h                    i            X      h                     i
+                          K=           E       b(k)
+                                                n B    bn           = Z(k)
+                                                                       n           E D  (k)   (k)
+                                                                                              B     (k)
+                                                                                                    D          Z(k)
+                                                                                                                n
+                                 k=1                                         k=1
+
+
+The weight vector can then be written as
+                   ⊤
+             r(k)         (k) (k)
+              n (x) := E[bn b     (x)]⊤ Jn [I + Jn K]−1
+                                                   "                                p
+                                                                                                           !      #−1
+                                            ⊤                                     X      h              i     ⊤
+                     = Z(k)
+                         n E[D
+                                (k) (k)
+                                   b (x)] Jn I + Jn Z(k)n                                 E D(k) B(k) D(k) Z(k)
+                                                                                                             n
+                                                                                    k=1
+
+                                                             Pp           (k) (k) (k)                                 (k)
+Now write h(k) (x) = E[D(k) b(k) (x)] ∈ Rm , H =                    k=1 E D   B D       , and note that we can express kn (x) =
+ (k)
+Zn h(k) (x) ∈ Rn . The weight vector is then:
+                                                                       i−1
+                                                         (k) (k) (k) ⊤
+                                               h
+                                       r(k)
+                                        n (x) = In + Jn Zn H    Zn         Jn k(k)
+                                                                               n (x).
+
+
+                                                                                                                                      −1
+Woodbury inverse. An application of the Woodbury formula ((I + U CV )−1 = I − U C −1 + V U                                                  V with
+        (k)                  (k) ⊤
+U = Jn Zn , C = H, V      = Zn ) yields:
+
+                                                   ⊤ −1
+                     h                              i                    h            ⊤
+                                                                                                i−1      ⊤
+                         In + Jn Z(k) (k)
+                                  n HZn                   = In − Jn Z(k)
+                                                                     n     H−1 + Z(k)
+                                                                                  n     Jn Z(k)
+                                                                                            n       Z(k)
+                                                                                                     n     .
+                                                                         |          {z            }
+                                                                                         :=M(k)−1
+
+
+                                                                             (k)⊤
+Bin–space compression (for the norm).                       Let c(k) := Zn          1n ∈ Rmk be the bin counts. Then
+
+                                                             1 (k)⊤                          1         ⊤
+                    Z(k)⊤
+                     n    Jn Z(k)  (k)⊤ (k)
+                              n = Zn   Zn −                   Z     1n 1⊤  (k)
+                                                                        n Zn = diag(c
+                                                                                      (k)
+                                                                                          ) − c(k) c(k) .
+                                                             n n                             n
+                                Manuscript under review by AISTATS 2026
+
+
+So defining
+                                                                             1 (k) (k) ⊤
+                                   M(k) := H−1 + diag(c(k) ) −                 c c       ,
+                                                                             n
+we can express
+                               (k) −1 (k) ⊤                                   (k) −1 (k) ⊤
+                 h                          i
+         r(k)              (k)
+          n (x) = In − Jn Zn M       Zn       Jn k(k)         (k)         (k)
+                                                  n (x) = Jn kn (x) − Jn Zn M       Zn Jn k(k)
+                                                                                           n (x).
+
+
+It now falls to us to note that the quantity on the very right of the above expression can be expressed as:
+                                                    ⊤
+                                z(k) (x) := Z(k)
+                                             n   Jn k(k)
+                                                     n (x)
+                                                    ⊤
+                                            = Z(k)
+                                                n  Jn Z(k)
+                                                       n h
+                                                           (k)
+                                                               (x)
+                                                                     
+                                                    (k)    1 (k) (k) ⊤ (k)
+                                            = diag(c ) − c c            h (x)
+                                                           n
+                                                                               ⊤
+                                                        (k)    (k)         c(k) h(k) (x) (k)
+                                            = diag(c          )h     (x) −              c .
+                                                                                n
+
+To recall, we now have, for
+                                                                                                          ⊤
+                                        1 (k) (k) ⊤                                                    c(k) h(k) (x) (k)
+         M(k) := H−1 + diag(c(k) ) −      c c       ,              z(k) (x) := diag(c(k) )h(k) (x) −                c ,
+                                        n                                                                   n
+we can express
+                                                                                   −1 (k)
+                               r(k)         (k) (k)
+                                n (x) = Jn Zn h     (x) − Jn Z(k)
+                                                              n M
+                                                                  (k)
+                                                                                         z     (x).
+
+Now, we can solve the small mk × mk system of linear equations for w(k) given by
+                                                   M(k) w(k) = z(k) (x),
+                                      −1 (k)
+to obtain the solution w(k) := M(k)     z      (x). We can then set q(k) (x) := h(k) (x) − w(k) (x), and observe that
+                                                 r(k)         (k) (k)
+                                                  n (x) = Jn Zn q     (x).
+To find its norm we simply compute:
+                                             ⊤
+                         ∥r(k)   2    (k)
+                           n (x)∥2 = rn   r(k)
+                                           n
+                                                          ⊤
+                                   = q(k) (x)⊤ Z(k)
+                                                n   Jn Jn Z(k)
+                                                           n q
+                                                               (k)
+                                                                   (x)
+                                                          ⊤
+                                   = q(k) (x)⊤ Z(k)
+                                                 n  Jn Z(k)
+                                                          n q
+                                                               (k)
+                                                                   (x)
+                                                                           
+                                                                1         ⊤
+                                   = q(k) (x)⊤ diag(c(k) ) − c(k) c(k) q(k) (x)
+                                                                n
+                                                                       1  (k) ⊤ (k) 2
+                                   = q(k) (x)⊤ diag(c(k) ) q(k) (x) −     c     q (x) .
+                                                                       n
+
+The final algorithm.
+                                                                     
+                                                     (k)          (k)
+ 1. Construct and cache diagonal matrix D(k) = diag ξ1 , . . . , ξmk , with
+             v           Pmk  (k)      
+                                          (k)
+                                               s
+             u (k)
+               L   (r)    l=1 1 Bl ∈ A Br              Number of bins in leaf containing bin r
+    ξr(k) := t
+             u
+                 (k)
+                       = P                   =                                                     .
+               NL(r)      n      (k)      (k)
+                                     ∈ A Br        Number of training samples in leaf containing bin r
+                          i=1 1 xi
+
+
+ 2. Construct and cache bin-level structure matrix and transform
+                                                         
+                                           (k)         (k)
+                                      1 Bj ∈ A Bi
+                          (k)
+                        Bi,j =  P                                              ,       b(k)  (k) (k)
+                                                                                              n = Zn D     .
+                                     mk        (k)         (k)
+                                     l=1 1   B l   ∈ A   B i
+                                                                            mk ×mk
+                                  Manuscript under review by AISTATS 2026
+
+
+ 3. On the fly, compute bin-level structure vector
+                                                     
+                                                                    
+                                                         (k)
+                                                    1 Bj ∈ A(x)
+                                    b(k) (x)⊤ =  P                                                     .
+                                                   mk        (k)
+                                                   l=1 1   B l   ∈ A(x)
+                                                                                              j=1,...,mk
+
+                                                 Pp     (k) (k) (k) 
+ 4. Estimate h(k) (x) = E D(k) b(k) (x) ∈ Rm , H =  k=1 E D   B D        over the ensemble, caching the
+    latter.
+                                                     (k) ⊤
+ 5. Compute and cache bin-counts c(k) := Zn               1n .
+                                                                              ⊤
+ 6. Construct and cache M(k) := H−1 + diag c                     − n1 c(k) c(k) .
+                                                         (k)
+                                                             
+
+
+ 7. On the fly, solve M(k) w(k) = z(k) (x) for w(k) .
+
+ 8. Set q(k) (x) := h(k) (x) − w(k) (x).
+
+ 9. Compute                                  r
+                                                                                          1  (k) ⊤ (k) 2
+                           ∥r(k)
+                             n (x)∥2 =           q(k) (x)⊤ diag(c(k) ) q(k) (x) −            c     q (x) .
+                                                                                          n
+
+B     Finite Sample Convergence
+
+B.1   A Fixed-point Iteration
+
+To investigate the finite sample convergence behavior of the algorithm, we begin with a set of postulated fixed
+point. For each subensemble’s prediction on the training set, assume the existence of a fixed point ỹk∗ . Then the
+Inferable EBM update rule leads to the following fixed point iteration:
+
+                                              1      1                           
+                                    ỹk∗ =        (I − 11⊤ )S(k) (y − ŷ) + bỹk∗
+                                             b+1      n
+
+Rearranging the equation gives the following identity
+
+                                                                 1 ⊤ (k)
+                                              ỹk∗ = (I −          11 )S (y − ŷ)                              (1)
+                                                                 n
+
+Since we do not know ŷ, we will solve for it and plug it back later. Sum the equations over k yields:
+
+                                             p                                       p
+                                     ∗       X               ∗            1 ⊤ X (k)
+                              ŷ := β̂ +           ỹk∗ = β̂ + (I −         11 )( S )(y − ŷ)
+                                                                          n
+                                             k=1                                    k=1
+
+
+And by the design of identifiability constraint, at fixed points, all residuals should have mean zero:
+
+                                                                      p
+                      1 ⊤               1          ∗  X                 ∗      1
+                        1 (y − ŷ) = 0 → 1⊤ (y − β̂ −   f (k) ) = 0 → β̂ = ȳ = 11⊤ y
+                      n                 n                                      n
+                                                                     k=1
+
+
+Plugging this back we have
+
+                           h        1      X       i−1 h    1      X         1   i
+                       ŷ = I + (I − 11⊤ )(  S(k) )     (I − 11⊤ )(  S(k) ) + 11⊤ y                            (2)
+                                    n                       n                n
+                                                    k                                     k
+
+
+Plugging it back to equation 1 produces the fixed-points for each subensemble:
+                                     Manuscript under review by AISTATS 2026
+
+
+                                                                                    
+                       1                          1 ⊤ X (k) −1     1 ⊤ X (k)   1 ⊤
+            ỹk∗ = (I − 11⊤ )S(k)
+                                         
+                                      I − I + (I − 11 )( S )     (I − 11 )( S ) + 11  y                                  (3)
+                       n                          n                  n           n
+                                                                       k                                   k
+
+                                                                                                                 
+The intercept term is canceled out following the algebra below:                           First, notice that I + (I −
+         Pp          
+     ⊤
+1
+n 11   )( k=1 S(k)
+                   )   ( n1 11⊤ ) = ( n1 11⊤ ), since the row sum of S(k) is always one and thus eliminated by
+                                                                                       Pp        −1             
+the centering operator. Multiplying both side by I + (I − n1 11⊤ )( k=1 S(k) )                          implies I + (I −
+         Pp          −1
+     ⊤
+1
+n 11 )(   k=1 S
+               (k)
+                   )        ( n1 11⊤ ) = ( n1 11⊤ ). This, once again, is killed by the composition (I − n1 11⊤ )S(k) . Hence
+the intercept would not matter in the final fixed point derivation.
+Assuming the invertibility of I + (I − n1 11⊤ )( k S(k) ) . The resolvent identity yields
+                                                       P         
+
+
+                                  1 ⊤ (k)         1       X       −1
+                    ỹk∗ = (I −     11 )S  I + (I − 11⊤ )(   S(k) ) y := Jn S(k) [I + Jn K]−1 y                          (4)
+                                  n                n
+                                                                           k
+
+
+The corresponding pointwise prediction for ∀x ∈ Rp is
+
+
+                                              f̂ (k) (x) = s(k) (x)Jn [I + Jn K]−1 y
+
+B.2    Specialized Tree Kernels
+
+Backfitting is known to fail under heavy multicollinearity: the ensemble predictions may converge, but the
+feature-wise functionals do not, due to non-identifiability. In our setting, this manifests as large overlaps between
+the kernel spaces of different features. To guarantee convergence, we must ensure that the residuals from other
+features are not fully contained in the kernel space of the current feature. When features are independent, this
+holds automatically; when they are correlated, it suffices to bound the cross-feature overlap strictly below one.
+In practice, we enforce the centering condition
+                                                     n
+                                                                 (k)
+                                                     X
+                                                            fk (xi ) = 0,         ∀k,
+                                                     i=1
+
+which removes the global constant direction, thereby eliminating the trivial overlap between feature-specific
+structure matrices. Formally, we state the setup below.
+Consider two features X (a) and X (k) . Define the maximal correlation
+
+                                    ρ∗ (X (a) , X (k) ) =        sup           E[ g(X (a) ) h(X (k) ) ].
+                                                                   g,h
+                                                             E[g]=E[h]=0
+                                                            E[g 2 ]=E[h2 ]=1
+
+
+This quantity equals the operator norm of the conditional–expectation projections: ∥Pa Pk ∥ = ρ∗ (X (a) , X (k) ),
+where Pk f = E[f | X (k) ] is the L2 projection onto functions of feature k. In particular, if features are not
+perfectly collinear, then ρ∗ (X (a) , X (k) ) < 1.
+In the finite-sample case, a tree grown on feature k induces a partition Πk of the sample indices. Its structure
+matrix SΠk is the orthogonal projector in Rn onto vectors constant on each leaf. Under SVI and Non–adaptivity,
+averaging over trees yields an expected structure matrix E[S (k) ] that depends only on the marginal distribution
+of X (k) . As n → ∞, these expected matrices converge to the population projection Pk . Hence after burn-in, the
+overlap between two expected structure matrices is asymptotically controlled by the maximal correlation:
+
+                                    E[S (a) ] E[S (k) ] ≤ ρ∗ X (a) , X (k) + on (1).
+                                                                          
+
+
+Thus, no perfect collinearity implies a strict bound < 1. A sufficient margin for contraction is
+                                     Manuscript under review by AISTATS 2026
+
+
+
+
+                                                                               1
+                                                sup ρ∗ X (a) , X (k) <
+                                                                    
+                                                                                  ,
+                                                a̸=k                          p−1
+
+
+
+which ensures ∥L∥ ≤ (p − 1)c3 < 1 in the block–operator bound. Geometrically, we are looking at two partitions
+                              n
+that does not vote more than p−1 points in same leaves, which suggest a uniform expansion of our observed data
+points in regions as we move into higher dimensions.Equivalently, one may assume the row–sum incoherence
+condition
+
+                                                       X
+                                               max            ∥E[S (k) ]E[S (a) ]∥ < 1,
+                                                 k
+                                                       a̸=k
+
+
+
+
+B.3   Contraction
+
+Under stated assumptions, we can prove that Algorithm 1’s prediction converge almost surely to a postulated
+fixed point presented in Equation ??. Formally, we make use of Theorem D.1, called a stochastic contraction
+mapping theorem, to demonstrate the difference between the current prediction and the fixed point is a stochastic
+contraction mapping.
+
+                                                                               (k)     Pb
+Theorem B.1. Denote the prediction using feature k at boosting round b as ŷb = 1b s=1 t(s,k) (x(k) ). Define
+                           Pp
+the aggregated kernel Kn := k=1 (I − ES(k) )† (I − n1 11⊤ )ES(k) . Suppose for each feature, there exists a fixed
+point:
+
+
+
+                                                               1 ⊤        h         † i
+                                ỹk∗ = (I − ES(k) )† (I −        11 )ES(k) I − I + Kn Kn y
+                                                               n
+
+
+
+which implies a global fixed point
+
+
+
+                                                   ∗
+                                                        h         † i
+                                           ŷ∗ = β̂ + Kn I − I + Kn Kn y
+
+
+
+       (k) a.s.          a.s.                                                                   ∗ a.s.
+Then ŷb   → ỹk∗ and ŷb → ŷ∗ under stated assumptions in 3. In the meantime, β̂ → ȳ := n1 1⊤ y.
+
+
+
+
+                  (k)    (k)                                                              (1)            (p)
+Proof. Denote Db = ŷb − ỹk∗ . Define the stacked distance vector Db = [Db , · · · , Db ]⊤ ∈ Rnp . Showing
+this random vector is a stochastic contraction mapping suffices to establish coordinate-wise convergence.
+For each coordinate, the conditional mean satisfies
+                                        Manuscript under review by AISTATS 2026
+
+
+
+                 (k)                  (k)
+           E[Db+1 | Fb ] = E[ŷb+1 − ỹk∗ | Fb ]
+                            h b                 1          1                      X                      i
+                                       (k)                                                (a)
+                         =E          ŷb +           (I − 11⊤ )Sb+1,(k)
+                                                                n       (y − ΓM         ŷb ) − ỹk∗ | Fb
+                              b+1            b+1          n
+                                                                                   a̸=k
+                             b     (k)      1           1                              X
+                                                                                                 (a)
+                                                                                                     
+                         =       ŷb +           (I − 11⊤ )E[Snb+1,(k) | Fb ](y − ΓM           ŷb ) − ỹk∗
+                           b+1             b+1          n
+                                                                                          a̸=k
+                             b      (k)      1           1                                 X (a)           
+                         =       Db +               (I − 11⊤ )E[Sb+1,(k)
+                                                                  n       | Fb ](y − ΓM          ŷb ) − ỹk∗
+                           b+1             b+1            n
+                                                                                                  a̸=k
+                              b     (k)    1       1                                                        X
+                                              (I − 11⊤ ) E[S(b,k)        | Fb ] − E[Sn(∞,k) | Fb ] (y −          ỹa∗ )
+                                                                                                  
+                           =     Db +                             n
+                             b+1          b+1      n
+                                                                                                            a̸=k
+                              1         1                    X                 X       (a)
+                                                                                            
+                           +     (I − 11⊤ )E[S(b,k)
+                                                 n   | Fb ](     ỹa∗ − ΓM           ŷb )
+                             b+1        n
+                                                            a̸=k                a̸=k
+                              b     (k)    1       1                            X               X
+                                                                                                       (a)
+                                                                                                           
+                           =     Db +         (I − 11⊤ )E[S(b,k)n      | F b ](    ỹ ∗
+                                                                                      a  −  Γ M     ŷ b     )
+                             b+1          b+1      n
+                                                                                       a̸=k         a̸=k
+                                 b  (k)  1      1                     (−k)
+                           :=      D +      (I − 11⊤ )E[S(b,k)
+                                                         n     | Fb ]∆b
+                                b+1 b   b+1     n
+
+
+          (−k)         P        (a)
+where ∆b         ≤     a ̸=k
+                               Db      . Without truncation, stacking across all features yields
+                                                                                
+                                                                   b         1
+                                            E[Db+1 | Fb ] =           Inp +     L Db ,
+                                                                  b+1       b+1
+
+where L is the np × np block matrix with diagonal blocks equal to 0 and off–diagonal blocks given by ES(k) ,
+multiplied by the averaging operator (I − n12 11⊤ ).
+The Partition Distinctness assumption implies that each off–diagonal block of L has operator norm at most c3 ,
+so by a Schur–type bound
+                                            ∥L∥ ≤ (p − 1)c3 < 1
+Consequently the stacked update satisfies
+                                                                        b + ∥L∥
+                                                 ∥E[Db+1 | Fb ]∥ ≤              ∥Db ∥
+                                                                          b+1
+                                                                                                     √
+                                                                                                  2M p
+For the deviation condition, if leaf predictions are bounded by M , then ∥ϵb+1 ∥ ≤                 b+1 , so supb ∥ϵb ∥ → 0 and
+           2
+P
+  b E[∥ϵb ∥ ] < ∞. This verifies the stochastic contraction mapping conditions.
+
+It remains to verify the convergence of the intercept term β̂. The update rule for the intercept is given by
+                                                                        p     n
+                                                                  1 X X (k)
+                                                 β̂ b+1 := β̂ b +         f̂b (xi )
+                                                                  n   i=1
+                                                                       k=1
+
+To identify this limit, recall that at the postulated fixed point we have
+                                                                        p
+                                                                   ∗    X
+                                                        ŷ∗ = β̂ +            ỹk∗ ,
+                                                                        k=1
+
+with n1 1⊤ ỹk∗ = 0 for all k. Taking the average over i gives
+                                                                        p
+                                                1 ⊤ ∗      ∗  1X ⊤ ∗      ∗
+                                                  1 ŷ = β̂ +   1 ỹk = β̂ .
+                                                n             n
+                                                                       k=1
+                                     Manuscript under review by AISTATS 2026
+
+
+But n1 1⊤ ŷ∗ = n1 1⊤ y = ȳ since the residuals at convergence have mean zero. Therefore the intercept converges
+almost surely to the global mean of the response,
+
+                                                            a.s.          1 ⊤
+                                                     β̂ b −→ ȳ =           1 y.
+                                                                          n
+
+
+
+
+We drop the subscript n if no ambiguity is caused.
+                                                  (k)
+Corollary B.1. By defining f̂ (k) := lim f̂b , the feature-wise prediction:
+                                           b→∞
+
+
+                                                                            1 ⊤ h                   i
+                        f̂ (k) (x) = E[s(k) (x)]⊤ (I − ES(k) )† (I −          11 ) I − (I + Kn )† Kn y
+                                                                            n
+
+and the ensemble prediction
+
+                                     p
+                                     X                                           1 ⊤ h                   i
+                    f̂ (x) := ȳ +         E[s(k) (x)]⊤ (I − ES(k) )† (I −         11 ) I − (I + Kn )† Kn y
+                                                                                 n
+                                     k=1
+
+
+Intuitively, after centering each signal vector, we would have a decomposition with additive feature-shaped
+functionals plus a intercept, which is ȳ. If we plot the partial-dependency figure, we would see all predicted
+signal oscillating around 0. In that case, interpretation is as follow: If we observe no features, the best guess
+                         ∗
+would be the baseline β̂ = ȳ. As we adding more and more features, we are able to recover greater parts of the
+function landscape.
+
+
+C      Limiting Distribution
+
+In Section B, we have shown that as we keep boosting, our feature estimators will converge to a stacked kernel-
+ridge-regression
+
+                                                 p
+                                             ∗   X
+                                 ŷ∗ = β̂ +             f̂ (k) (X) = ȳ + Jn S(k) [I + Jn K]−1 y
+                                                 k=1
+
+
+with
+
+                                                                   p
+                                                                   X
+                                                           K :=          ES(k)
+                                                                   k=1
+
+
+C.1    Preliminaries for Asymptotic Normality
+
+To show asymptotic normality, consider the following decomposition:
+
+                    (k)                  (k)
+                   fn (x) − f (k) (x)
+                   b                    fn (x) − ⟨r(k) (x), f (Xn )⟩ ⟨r(k) (x), f (Xn )⟩ − f (k) (x)
+                                        b
+                                      =                             +                                         (5)
+                         r(k)                     r(k)                             r(k)
+
+
+The first term can be easily shown by constraining leaf size, which we discuss in Section C.2. The later term is
+trickier. Generalizing from training set to the whole input space, we expect a convergence that is at least of a
+weak. Bounded kernel, fortunately, allows us to do so.
+                                 Manuscript under review by AISTATS 2026
+
+
+C.2   Conditional Asymptotic Normality
+
+We begin analysis by showing asymptotic normality on the training set.                    Formally, denote f (X) =
+[f (x1 ), · · · , f (xn )]⊤ . What we want to show is that, given any x ∈ Rp , ∀k:
+
+                                        f̂ (k) (x) − r(k) (x)⊤ f (X) d
+                                                                     → N (0, σ 2 )
+                                                   r(k) (x)
+
+The key component of this proof is the rate of r(k) 1 , r(k) , r(k) ∞ . These rates will be built on a result
+shown in the original Boulevard paper on the behavior of subsampling rate.
+                                                                                                                  1
+Lemma C.1. Considering a subsampled regression tree. Assume that each leaf contains no fewer than n p+2
+                                                                                 1
+sample points before subsampling. If we are subsampling at rate at least ξ = n− p+2 log n , then the expected
+structure vector’s norm follows the rate below:
+                                                              
+                                                              1
+                                                k(k) = 1 − O
+                                                              n
+
+Our plan to conditional CLT is as follow: Lemma C.1 specifies a proper subsample rates that enables norm
+                                                                                         (k)
+                                                                                     r
+convergence. Lindeberg condition simply asks us to check the truncation level         i
+                                                                                            . We will first study the
+                                                                                    ∥r(k) ∥
+norm of k(k) . To bound the ℓ1 norm, it suffices to imposing conditions on the leaf size (with respect to the
+Lebesgue measure of data points). To bound the ℓ2 norm. A simple algebra utilizing the rate of ℓ1 norm will
+help with that, too.If this norm is well controlled,
+                                           h         noticei that the Boulevard vector r(k) is simply a sum of rows
+                           (k) †
+in the matrix P := (I − K ) (I − n 11 ) I − (I + K)† K with the weighting vector being k(k) . Hence it suffices
+                                    1    ⊤
+
+to study the eigenvalues of the operator P, which we discuss below.
+Lemma C.2 (Spectrum of K(k) ). For any feature k, the expected structure matrix K(k) = E[S(k) ] is a symmetric
+operator on Rn with spectrum contained in [0, 1]. It always holds that K(k) 1 = 1, so 1 is an eigenvalue with
+eigenvector 1. Restricting to the mean–zero subspace H0 = {v : 1⊤ v = 0}, the supremum of the spectrum is
+bounded by
+                                    sup{λ : λ ∈ σ(K(k) |H0 )} = ρk < 1,
+provided the distribution of partitions under Qkn is not almost surely degenerate.
+
+Proof. Fix any unit v ∈ H0 . Because S(k) is an orthogonal projector, v ⊤ S(k) v = ∥S(k) v∥2 , with equality
+∥S(k) v∥ = 1 if and only if v ∈ range(S(k) ). Hence
+                                                 h         i   h         i
+                                  v ⊤ K(k) v = E v ⊤ S(k) v = E ∥S(k) v∥2 ≤ 1.
+
+Assume toward a contradiction that λmax (K(k) |H0 ) = 1. Then there exists a sequence of unit vectors vm ∈ H0
+        ⊤ (k)
+with vm  K vm → 1. By the display, E[∥S(k) vm ∥2 ] → 1. The map Π 7→ ∥S(k) vm ∥2 takes values in [0, 1], so
+if its expectation tends to 1, we must have ∥S(k) vm ∥2 → 1 in probability (with respect to m). Passing to a
+subsequence if necessary and using compactness of the unit sphere, take vm → v⋆ with ∥v⋆ ∥ = 1 and v⋆ ∈ H0 .
+By lower semicontinuity and the projector property, ∥S(k) v⋆ ∥ = 1 almost surely, hence S(k) v⋆ = v⋆ almost surely.
+Therefore v⋆ ∈ range(S(k) ) for almost every draw of S(k) .
+If the distribution of S(k) charges at least two distinct partitions with positive probability, their ranges (as
+subspaces of Rn ) intersect on H0 only in {0} unless v⋆ is proportional to 1, which it is not. Thus v⋆ cannot lie
+in the range of both with positive probability, a contradiction. Hence λmax (K(k) |H0 ) < 1.
+
+Lemma C.2 gives a strict bound on the eigenvalues of the expected kernel, which we can utilize to stabilize the
+behavior of the aggregated kernel K, which is described in the following lemma.
+Lemma C.3 (Aggregated kernel). Work on the mean–zero subspace H0 = {v ∈ Rn : 1⊤ v = 0}. The aggregated
+kernel
+                                     Xp                       
+                               K :=     (I − K(k) )† I − n1 11⊤ K(k)
+                                              k=1
+                                  Manuscript under review by AISTATS 2026
+
+                                                          
+is symmetric and positive semidefinite. Since I − n1 11⊤ is the identity on H0 , we may write on H0 simply
+K = k (I − K(k) )† K(k) . If ρk := ∥K(k) ∥H0 < 1, then on H0 one has the operator sandwich
+     P
+
+                                          p                  p
+                                          X                  X        1
+                                                K(k) ⪯ K ⪯                K(k) ,
+                                                                   1 − ρk
+                                          k=1                k=1
+                        P          
+                                                              ρk
+hence λ+          +           (k)
+                                                         P
+       min (K) ≥ λmin       aK          and λmax (K) ≤     k 1−ρk .
+
+
+Proof. Each summand (I−K(k) )† K(k) is symmetric because K(k) is symmetric and (I−K(k) )† is a Borel function
+of K(k) ; positivity follows from x 7→ (1 − x)† x being nonnegative on [0, 1). On H0 , the eigenvalues of (I − K(k) )†
+lie in [1, 1/(1 − ρk )], so for any v ∈ H0 ,
+
+                                                                           1
+                              v ⊤ K(k) v ≤ v ⊤ (I − K(k) )† K(k) v ≤           v ⊤ K(k) v.
+                                                                        1 − ρk
+
+Summing over k gives the stated Loewner bounds, from which the eigenvalue bounds follow.
+
+Combining those bounds above, we are able to claim that our EBM operator P will not explode in some directions.
+Formally, we have the following lemma.
+Lemma C.4 (Eigenvalues of P). Work on the mean–zero subspace H0 = {v ∈ Rn : 1⊤ v = 0}. Define
+                                     h             i                     p
+                                                                           X                         
+          P := (I − K(k) )† I − n1 11⊤ I − (I + K)† K ,             K :=       (I − K(k) )† I − n1 11⊤ K(k) .
+                                                                           k=1
+
+On H0 the centering projector is the identity and (I + K)† = (I + K)−1 , hence
+
+                                        P = (I − K(k) )† (I + K)−1         on H0 .
+
+The matrix P is symmetric and positive semidefinite on H0 . Writing ρk := ∥K(k) ∥H0 < 1, its eigenvalues lie in
+the interval
+                                     1                                   1
+                                               ≤ λ(P) ≤                            .
+                                1 + λmax (K)                (1 − ρk ) 1 + λ+min (K)
+                                              −1
+In particular, ∥P∥ ≤ (1 − ρk ) (1 + λ+
+                                     min (K))     ≤ (1 − ρk )−1 . If, in addition, K(k) and K commute on H0 , then
+P is diagonalizable in a common eigenbasis and
+                                               1            1
+                            λi (P) =                   ·           ,       i = 1, . . . , n − 1.
+                                         1 − λi (K(k) ) 1 + λi (K)
+
+Proof. On H0 we have I − n1 11⊤ = I and
+
+                                 I − (I + K)† K = I − (I + K)−1 K = (I + K)−1 ,
+
+so P = (I − K(k) )† (I + K)−1 on H0 . Since K(k) and K are symmetric, by the spectral theorem we may write
+K(k) = U ΛU ⊤ with Λ = diag(λi ) and define (I−K(k) )† = U (I−Λ)† U ⊤ , where (1−λi )† = 1/(1−λi ) if λi ̸= 1 and
+0 otherwise. Thus (I − K(k) )† is symmetric and positive semidefinite on H0 , with eigenvalues in [1, (1 − ρk )−1 ].
+Likewise, K is symmetric positive semidefinite, so (I+K)−1 is symmetric positive definite on H0 , with eigenvalues
+in [1/(1 + λmax (K)), 1/(1 + λ+
+                              min (K))]. The product of symmetric positive semidefinite matrices has nonnegative
+spectrum; moreover, for any matrices A, B the extremal singular values satisfy smin (AB) ≥ smin (A)smin (B) and
+smax (AB) ≤ smax (A)smax (B). Applying these to A = (I − K(k) )† and B = (I + K)−1 yields the stated eigenvalue
+interval and the norm bound. If K(k) and K commute, they are simultaneously diagonalizable on H0 , and the
+eigenvalue formula follows by multiplying the diagonal entries.
+
+Then our analysis proceed with the assistance of the following theorem, cited from the original Boulevard paper
+as well.
+                                       Manuscript under review by AISTATS 2026
+
+
+Lemma C.5 (Rate of Convergence). Let Bn := {i : ∥x − xi ∥ ≤ dn } be the points within distance dn from test
+                                                    1 1                    1 1
+point x. If |Bn | = Ω(n · ddn ), then k(k) 2 = Θ(n− 2 d+1 ), r(k) 2 = Θ(n− 2 d+1 ).
+
+This lemma holds true regardless of the design of our boosting process. The key argument is the minimal leaf
+size. A sketch of proof is appended below.
+
+Proof. To bound k(k) , recall:
+                                                                         "                  #
+                                        (k)     (k)                            1(xj ∈ A)
+                                       knj = E[sn,j (x)] = E                 Pn               ,x ∈ A
+                                                                              j=1 1(xj ∈ A)
+
+encodes the expected influence of point xj on a point of interest x among other n points. Then the condition
+                                                             n
+                                                             X                                   1
+                                                     inf            1(xi ∈ A) ≥ Ω(n d+1 )
+                                                   A∈q∈Qn
+                                                              i=1
+
+                   (k)         1
+implies that knj = Øn− d+1 , since we can’t have total weights of more than O(1) in a leaf. By Lemma C.1,
+ k(k) 1 ≤ 1,
+                                           q                         1 1
+                                   k(k) ≤     k(k) 1 k(k) ∞ = Øn− 2 d+1 .
+
+By assetion |Bn | = Ω(n · ddn ), there are at most
+                                                                                         1
+                                                            Ω(n · ddn ) = Ω(n d+1 )
+                                                                                                             (k)
+knj ’s that are positive. Equivalently, we can have the magnitude of each non-zero knj is lower bounded by
+         1
+      − d+1
+Ω(n           ). This holds also because the total weights can’t be larger than O(1). Since k(k) 1 = 1 − O(n−1 ),
+                                                   r               1       2       1               1   1
+                                        k(k) = Ω(             n− d+1             · n d+1 ) = Ω(n− 2 d+1 ).
+
+By lemma C.4, we know that r(k) is a linear transformation from k(k) by P, where P has bounded eigenvalues.
+Hence r(k) enjoys similar rates.
+
+Having access to the rate of convergence of r(k) , we can fill in the blank of the weighting vector argument
+in the Lindeberg conditions. Concretely, it controls any error deviate too much from 0 that contributes to
+non-normality. We state the theorem below.
+Theorem C.1 (Conditional Asymptotic Normality). For any x ∈ [0, 1]p , write f (Xn ) = (f (x1 ), . . . , f (xn ))⊤ .
+Then under SVI, Non-Adaptivity, Minimal Leaf Size and assumptions in Lemma C.5, we have
+                                               (k)
+                                              fn (x) − ⟨r(k) (x), f (Xn )⟩ d
+                                              b
+                                                                           → N (0, σ 2 ).
+                                                        r(k)
+
+Proof. Write
+                                                                 ⊤            ⊤
+                                                     f (x) − r(k) f (X) = r(k) ⃗ϵn .
+                                                     b
+
+                                                                                             ⊤
+To obtain a CLT we check the Lindeberg-Feller condition of r(k) ⃗ϵn , i.e. for any δ > 0,
+                                                     n
+                                          1          X  h
+                                                           (k)         (k)
+                                                                                         i
+                                lim           2        E (ri ϵi )2 1(|ri ϵi | > δ r(k) σ) = 0.
+                                   n   r(k)       σ 2 i=1
+                    1
+                       
+Since k(k) ∞ = O n− d+2 and P has bounded row sums, we have
+                                                                                           1
+                                                                                              
+                                              r(k)       ≤ k(k)              · ∥P∥1 = O n− d+1 .
+                                                     ∞               ∞
+                                    Manuscript under review by AISTATS 2026
+
+                                       1   1
+Furthermore, since r(k) = Θ(n− 2 d+1 ), we get
+
+                                                   r(k) ∞        1 1 
+                                                             = O n− 2 d+1 ,
+                                                    r(k)
+
+This allows us to check out the Lindeberg-Feller conditions:
+           n                                      n        q
+                                                     (k) 2
+              h                                i X
+                 (k)        (k)                                              (k)
+           X
+                       2                 (k)
+             E (ri ϵi ) 1(|ri ϵi | > δ r     σ) ≤   ri       E[ϵ4i ] · E[1(|ri ϵi | > δ r(k) σ)]
+            i=1                                              i=1
+                                                                                  v                     !
+                                                              n                   u
+                                                                      2                       δ∥r(k) ∥σ
+                                                                        q
+                                                                  (k)
+                                                             X                    u
+                                                           ≤     ri           4
+                                                                          E[ϵi ] · P |ϵi | ≥
+                                                                                  t
+                                                                                                 (k)
+                                                             i=1                                ri
+                                                                                 v      
+                                                              n
+                                                                                 u                             !2 
+                                                             X (k) 2    q        u
+                                                                                             1      δ∥r (k) ∥σ
+                                                           ≤     ri       E[ϵ4i ]t2 exp − 2 ·
+                                                                                 u                                
+                                                                                           2σ           (k)
+                                                             i=1                                       r      i
+                                                                    2                   1
+                                                                                              
+                                                           ≤ r(k)        exp −O(n d+1 ) −→ 0
+
+Since ϵ is sub-Gaussian noise, the concentraion bound holds by definition of ϵ.
+
+C.3    Bias Control and Asymptotic Unbiasedness
+
+In Section C.2 we established a conditional central limit theorem: conditioning on the training covariates X, the
+noise contribution r(k) (x)⊤⃗ϵ is asymptotically normal with variance σ 2 . To extend this to an unconditional CLT
+for the estimator, it remains to verify that all bias terms arising from the random design vanish at rate op (1).
+Recall the decomposition
+                                                                                                X
+  fˆ(k) (x) − f (k) (x(k) ) = r(k) (x)⊤ β + r(k) (x)⊤ f (k) (X(k) ) − f (k) (x(k) ) + r(k) (x)⊤   f (a) (X(a) ) + r(k) (x)⊤⃗ϵ.
+                                                                                   
+
+                                                                                                      a̸=k
+
+
+The last term is the conditional CLT contribution. We now show that the three deterministic terms (baseline,
+same-feature, cross-feature) all converge to zero at suitable rates.
+Lemma C.6 (Baseline Bias). Let β ∈ Rn denote the baseline vector. Without subsampling, r(k) (x)⊤ β = 0 for
+all k = 1, . . . , p.
+
+Proof. By definition,
+                            r(k) (x)⊤ = k(k) (x)⊤ (I − ES(k) )† (I − n1 11⊤ ) I − (I + K)† K ,
+                                                                                           
+
+            Pp             (k) †
+where K =     k=1 (I − ES     ) (I − n1 11⊤ )ES(k) . Since every structure matrix has row sum 1, the centering
+operator annihilates 1, so Kβ = 0 and likewise (I − n1 11⊤ )β = 0. Thus the entire product vanishes.
+
+The same feature term bias can be killed by building deeper trees as we collect more and more observations from
+the underlying data generating process. This can be realized by inheriting assumptions on leaf size from Zhou
+and Hooker (2019), which we present below:
+Remark 1. If subsampling is used, it suffices that the row sum of S(k) converges to 1 at rate o(1) so that
+r(k) (x)⊤ β = op (1).
+Lemma C.7 (Same–feature Bias). Let f (k) be L–Lipschitz in its argument, and let An (x) denote the (feature-k)
+                                                                                 (k)                   (k)
+leaf containing x. Suppose the same–feature weights are local in the sense that rn,i (x) = 0 whenever xi ∈ / An (x),
+                                                                   (k)               (k)
+and ∥r(k) (x)∥1 = Op (1). Then, writing ρn,k (x) := sup{|xi              − x(k) | : xi       ∈ An (x)}, we have
+
+              r(k) (x)⊤ f (k) (X(k) ) − f (k) (x(k) ) ≤ L ρn,k (x) ∥r(k) (x)∥1 = Op dn                = Op n−1/(d+1) .
+                                                                                                                   
+
+
+In particular, this term is op (1).
+                                      Manuscript under review by AISTATS 2026
+
+
+Proof. By the locality assumption,
+
+                                               X (k)             (k)
+                                                                                                            X               (k)        (k)
+ r(k) (x)⊤ f (k) (X(k) ) − f (k) (x(k) ) =      rn,i (x) f (k) (xi ) − f (k) (x(k) ) ≤ L                                                     − x(k) |.
+                                                                                    
+                                                                                                                          |rn,i (x)| |xi
+                                                i                                                       (k)
+                                                                                                    i: xi       ∈An (x)
+
+
+
+The inner distances are bounded by ρn,k (x) ≤ diam(An (x)), so
+
+                                                                                      (k)
+                                                                              X
+                  r(k) (x)⊤ f (k) (X(k) ) − f (k) (x(k) ) ≤ L ρn,k (x)              |rn,i (x)| = L ρn,k (x) ∥r(k) (x)∥1 .
+                                                                                i
+
+
+
+And since ∥r(k) (x)∥1 = Op (1), hence the product is Op (dn ) = Op (n−1/(d+1) ) = op (1).
+
+
+
+
+Thus the same-feature contribution is negligible whenever leaves shrink and the weight vector has bounded ℓ1
+norm.
+Lemma C.8 (Rate of Leakage). Under specified assumptions in section 3, the rate of the leakage term is
+
+
+                                               X                         1             1
+                                 |r(k) (x)⊤           f (a) (X)| = O(n− d+1 log n) + O( ) = o(1)
+                                                                                       n
+                                               a̸=k
+
+
+
+
+Proof. We will make use of the radius factor ln = ⌈c1 log n⌉. The leakage term admits the decomposition
+
+
+                                    X                                X                                 X
+                        r(k) (x)⊤          f (a) (X) = r(k) (x)|⊤
+                                                                Dn          f (a) (X) + r(k) (x)|⊤
+                                                                                                 Dnc            f (a) (X)
+                                    a̸=k                             a̸=k                              a̸=k
+
+
+
+Without loss of generality, we control the behavior of a single dimension a. First bound the near-by term
+r(k) (x)|⊤
+         Dn f
+              (a)
+                  (X). By assertion, the underlying additive terms are L-Lipschitz, which guarantees deterministi-
+cally the rate
+
+
+
+                                                                                                            1
+                |r(k) (x)|⊤
+                          Dn f
+                               (a)
+                                   (X)| ≤ L · ln dn r(k) (x)|Dn             = O(dn log n) = O(n− d+1 log n) = o(1)
+                                                                       1
+
+
+
+Next, we show that the peripheral contribution also goes to 0. Recall by definition
+
+
+
+                   |r(k) (x)|⊤       (k)
+                                         (x)|⊤          (k) −1
+                                                           ) (I − n1 11⊤ ) I − (I + K)−1 K f (a) (X(a) )
+                                                                                         
+                             Dnc = k         Dnc (I − ES
+
+
+
+
+                                     1
+By C.2, we know that I − K(k) op ≤ 1−ρ k
+                                         and I − n1 11⊤ op ≤ 1. Hence the goal is to control the rate of the
+last linear transformation.
+Working on the centered subspace H0 = {v : v⊤ 1 ̸= 0}. We’ve shown that on the subspace H0 it holds true that
+[I − (I + K)−1 K] = (I + K)−1 . Combining the bound above, we consider the Neumann expansion of the kernel
+                                    Manuscript under review by AISTATS 2026
+
+
+
+                                                     (k)
+                                    X
+                  r(k) |Dnc =                    |rni |
+                                |x−xi |>ln ·dn
+                                                                h                                          i
+                                                            (k)
+                                    X                X
+                                                           knj (I − ES(k) )−1 (I − n1 11⊤ ) I − (I + K)−1 K |
+                                                                                           
+                            =                    |
+                                                                                                                                j,i
+                                |x−xi |>ln ·dn       j
+                                                                                h              i
+                                                                             (k) 
+                                           X                      X
+                            ≤C×                            |                knj I − (I + K)−1 K |
+                                                                                                                   j,i
+                                     |x−xi |>ln ·dn |x−xj |≤dn
+                                                                                 h       i
+                                                                             (k)
+                                           X                         X
+                            =C×                            |                knj (I + K)−1 |
+                                                                                                       j,i
+                                     |x−xj |>ln ·dn |x−xj |≤dn
+                                                                                       h         i
+                                                               (k)
+                                           X                               X
+                            ≤C×                            knj                        | (I + K)−1 |
+                                                                                                             j,i
+                                     |x−xj |>ln ·dn                  |x−xi |>ln ·dn
+                                                                                             h         i
+                                                               (k)
+                                           X                                X
+                            ≤C×                            knj                              | (I + K)−1 |
+                                                                                                                   j,i
+                                     |x−xj |>ln ·dn                  |xi −xj |>(ln −1)·dn
+
+
+
+
+By Lemma C.4, we know that I + K is positive semidefinite, has bounded inverse and has bounded spectrum
+from [1 + λmin (K), 1 + λmax (K)]. Hence by proposition D.1, the bound above proceeds as
+
+
+                                                                               (k)
+                                                                 X                                  X
+                           r(k) (x) Dc         ≤C                            knj (x)                               C0 q ℓn −1
+                                       n   1
+                                                           (k)                              (k)
+                                                      |xj −x(k) |≤dn                    |xi       −x(k) |>ℓn dn
+                                                               ℓn −1
+                                               ≤ O(n q                 )
+                                                           −1
+                                               = O(q             · n · q c1 log n )
+                                               = O(q −1 n1−c1 log q )
+
+          √
+            (1+λmax (K))/((1+λmin (K))−1
+where q = √                              . Choose c1 = log2 q we have this contribution being O( n1 ) = o(1). And
+              (1+λmax (K))/((1+λmin (K))+1
+       (k)   (k)
+since f (X ) are bounded for all k below M , hence the peripheral term is also of rate o(1). Adding the
+inner-rim term preserves the rate o(1).
+
+
+
+Collecting Lemmas C.6–C.8 and the we conclude that the random-design bias terms vanish in probability. To-
+gether with the conditional CLT for the noise term, Slutsky’s theorem implies the full estimator is asymptotically
+normal (formalized in the next subsection).
+
+C.4    Unconditional Asymptotic Normality
+
+In Section C.3, we have shown that all bias terms vanish to 0 deterministically, given the rate on k(k) and
+ r(k) hold. However the rate does not come for free. To ensure such assumptions hold, we require our tree
+structure space to be restricted to support such rate. Formally, we introduce the lemma below.
+Lemma C.9. For given x ∈ [0, 1]d , suppose we have random sample (x1 , y1 ), . . . , (xn , yn ) for each n. If we
+                                                        (k)
+restrict the cardinality of all univariate tree space Qn using any small α > 0 s.t.
+                                                                            
+                                                     1        1 d+2
+                                                                  1
+                                                                    −ν
+                                         |Q(k)
+                                            n  | = Ø   exp      n      − n α
+                                                                               ,
+                                                     n        2
+
+then
+                                               f̂ (k) (x) − r(k) (x)⊤ f (X) d
+                                                                            → N (0, σϵ2 ).
+                                                          ]r(k) (x)
+                                  Manuscript under review by AISTATS 2026
+
+
+Proof. The proof is similar to Zhou and Hooker (2019) and we direct the audience to the Lemma 4.3. The idea
+is that we’ve already shown in section C.2 that under the stated assumptions of |Bn | and the growing minimal
+number of points in tree, we will get the conditional clt for free. Hence the strategy is to show that those two
+assumptions are met almost surely. Here we simply replace the uniform tree space for the specialized tree space
+  (k)
+Qn , k = 1, · · · , p.
+The sketch of proof is as follow. To show (i), we bound the tail probability of the cardiality of Bn being too
+large, i.e. P(|Bn | > an ) for some growing an . This tail probability is bounded by multiplicative Chernoff bound
+and absolutely summable, which is then a.s. implied by Borel-Cantelli.
+As for (ii), we use the similar strategy. Notice that the probability of interest is
+
+                                                                       n                            
+                                                                        X                       1
+                             P ∃A ∈ Π ∈ Q(k)
+                                         n s.t.             inf               I(xi,n ∈ A) > Cn d+2
+                                                                  (k)
+                                                     A∈Π∈Qn             i=1
+
+                                  (k)
+for some C. The cardinality of Qn comes in here to serve as a union bound. It can similarly be shown that this
+probability is also summable and hence (ii) holds a.s..
+
+
+
+Combining all results from section C.3, C.2, C.4.
+Theorem C.2. Under assumptions on tree space, and all assumptions from section 3, we have
+
+                                             f̂ (k) (x) − f (k) (x) d
+                                                                    → N (0, σ 2 )
+                                                     r(k) (x)
+
+for all k = 1, · · · , p.
+
+Proof. We break the numerator into three terms.
+
+
+f̂ (k) (x) − f (k) (x)      1              ⊤              ⊤ (k)
+                                                                                     (k) ⊤ X (a) (a)
+                       =          (r(k)
+                                        (x)  β+ r (k)
+                                                      (x)  f    (X (k)
+                                                                       )−f (k) (k)
+                                                                              (x   ) +r (x)      f (X )+r(k) (x)⊤⃗ϵ)
+        r(k) (x)         r(k) (x)                                                           a̸=k
+
+
+Under restricted tree space assumptions, all terms except the last term are op (1), and the last term is conditionally
+asymptotically normal. By Slutsky’s theorem, the sum has a limiting distribution being N (0, σ 2 ).
+
+The CLT holds trivially for the baseline vector as well, by definition of the fixed point it converge to.
+                                                         Pn
+Theorem C.3 (CLT for Baseline Vector). Let β̂ = n1 i=1 yi denote the baseline estimator returned by Algo-
+                                                   √
+rithm 1. Under Assumption 3, the random vector n (β̂ − β) converges in distribution to a Gaussian:
+                                          √               d
+                                            n (β̂ − β) −→ N (0, σ 2 ),
+where β = E[Y ] is the population intercept.
+
+Proof. By construction of the algorithm, the intercept is always updated by the global mean of residuals. At
+convergence this coincides with the empirical mean of the responses:
+                                                                    n
+                                                              1X
+                                                      β̂ =          yi .
+                                                              n i=1
+
+Since yi = f (xi ) + ϵi with E[ϵi ] = 0 and Var(ϵi ) = σ 2 < ∞, we have E[yi ] = β. Because the {yi } are i.i.d.
+sub–Gaussian with finite variance, the Lindeberg–Feller central limit theorem applies, yielding
+                                                        n
+                                √                 1 X                   d
+                                    n (β̂ − β) = √       (yi − E[yi ]) −→ N (0, σ 2 ).
+                                                   n i=1
+                                 Manuscript under review by AISTATS 2026
+
+
+
+
+D    Stochastic Contraction Mapping Theorem
+
+Theorem D.1. Given Rd -valued stochastic process {zt }t∈N , a sequence of 0 < λt ≤ 1, define
+
+                                                   F0 = ∅, Ft = σ(z1 , . . . , zt ),
+                                                        ϵt = zt − E[zt |Ft−1 ].
+
+We call zt a stochastic contraction if the following properties hold
+
+ 1. Vanishing coefficients
+                                                  ∞
+                                                  X                              ∞
+                                                                                 Y
+                                                        (1 − λt ) = ∞, i.e.            λt = 0.
+                                                  t=1                            t=1
+
+ 2. Mean contraction
+                                                   ||E[zt |Ft−1 ]|| ≤ λt ∥zt−1 ∥ , a.s..
+
+ 3. Bounded deviation
+                                                                       ∞
+                                                                       X            2
+                                                 sup ∥ϵt ∥ → 0,               E[∥ϵt ∥ ] < ∞.
+                                                                       t=1
+
+
+In particular, a multidimensional stochastic contraction exhibits the following behavior
+
+ 1. Contraction
+                                                                       a.s.
+                                                                   zt → 0.
+
+ 2. Kolmogorov inequality
+                                                                                √ P∞
+                                                                               4 d t=T +1 E[ϵ2t ]
+                                                                      
+                                    P       sup ∥zt ∥ ≤ ∥zT ∥ + δ          ≥1−                              (6)
+                                        t≥T                                      min{δ 2 , β 2 }
+                                                         √
+    holds for all T, δ > 0 s.t. β = ∥zT ∥ + δ −              d supt>T ∥ϵt ∥ > 0.
+Proposition D.1 (Demko–Moss–Smith, General Sparse Exponential Decay). Let A be positive definite, bounded,
+and boundedly invertible on ℓ2 (S). For any such A, define the support sets
+                                    n
+                                    [
+                        Sn (A) :=           {(i, j) : (Ak )ij ̸= 0},          Dn (A) := (S × S) \ Sn (A).
+                                    k=0
+
+Then there exist constants C0 < ∞ and q ∈ (0, 1), depending only on the spectral bounds of A, such that
+
+                                    sup{ |A−1 (i, j)| : (i, j) ∈ Dn (A) } ≤ C0 q n+1 .
+
+Here the decay factor q is given explicitly by
+                                                        √
+                                                          r−1                      b
+                                                    q = √     ,               r=     ,
+                                                          r+1                      a
+
+where [a, b] is the smallest interval containing the spectrum of A.
+

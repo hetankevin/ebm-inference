@@ -25,9 +25,6 @@ def main():
     ap.add_argument("--noise", type=float, default=0.5)
     ap.add_argument("--rounds", type=int, default=200)
     ap.add_argument("--level", type=float, default=0.95)
-    ap.add_argument("--use-nystrom", action="store_true")
-    ap.add_argument("--nystrom-rank", type=int, default=256)
-    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     ap.add_argument("--out", type=str, default="intervals_1d.png")
     args = ap.parse_args()
 

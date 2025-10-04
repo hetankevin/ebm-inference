@@ -9,15 +9,11 @@ def run(cmd):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", type=str, default="exp_out")
-    ap.add_argument("--use-nystrom", action="store_true")
-    ap.add_argument("--nystrom-rank", type=int, default=256)
-    ap.add_argument("--nystrom-ridge", type=float, default=1e-6)
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
     py = sys.executable
-    base = ["--use-nystrom"] if args.use_nystrom else []
-    base += ["--nystrom-rank", str(args.nystrom_rank), "--nystrom-ridge", str(args.nystrom_ridge)]
+    base: list[str] = []
 
     # Core experiments
     run([py, "coverage_rates.py", "--out", os.path.join(args.outdir, "coverage_summary.csv")] + base)
