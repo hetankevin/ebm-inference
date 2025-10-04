@@ -112,16 +112,31 @@ def main():
     # QQ plot
     q = np.linspace(0.5/len(z), 1 - 0.5/len(z), len(z))
     theo = np.sqrt(2.0) * erfinv(2*q - 1)
-    plt.figure(figsize=(6,6))
-    plt.plot(theo, z, ".", ms=3)
+    plt.figure(figsize=(8,8))
+    
+    # Plot points with larger size and better visibility
+    plt.scatter(theo, z, s=20, alpha=0.6, edgecolors='none', label='Data points')
+    
+    # Add diagonal reference line
     lo = min(theo.min(), z.min()); hi = max(theo.max(), z.max())
-    plt.plot([lo, hi], [lo, hi], "--")
+    plt.plot([lo, hi], [lo, hi], "--", color='red', linewidth=2, label='y=x')
+    
+    # Add some statistics to the plot
+    z_std = np.std(z)
+    z_mean = np.mean(z)
+    plt.text(0.05, 0.95, f'Mean: {z_mean:.3f}\nStd: {z_std:.3f}\nN: {len(z)}', 
+             transform=plt.gca().transAxes, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
     plt.xlabel("Theoretical N(0,1) quantiles")
     plt.ylabel("(E[f̂]-f̂)/ (σ‖r‖)")
     plt.title("QQ plot (CI vs EBM target)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(args.out, dpi=150)
     print(f"Saved {args.out}")
+    print(f"Standardized residuals: mean={z_mean:.4f}, std={z_std:.4f}")
 
 if __name__ == "__main__":
     main()
